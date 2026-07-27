@@ -1,0 +1,208 @@
+# Multi-Region Model Deployment & Failover Proxy
+
+A FastAPI reverse proxy that fronts three containerised "cloud regions" serving model inference,
+rate-limits callers with a Redis token bucket, and keeps serving traffic when a region dies mid-flood.
+
+The mock inference isn't the interesting part. The failure surface is:
+
+- `docker stop` does **not** cause a timeout. Docker's embedded resolver withdraws the container's
+  DNS record, so the client gets a `ConnectError` in about 2 ms. Most implementations of this brief
+  assume a timeout and never find out.
+- `docker pause` **does** cause a timeout — the kernel still ACKs the SYN from the listen backlog, so
+  the connection succeeds and then hangs. It is the only way to prove the 200 ms read timeout is
+  actually live.
+- A warm keep-alive pool turns a killed upstream into a `RemoteProtocolError`, which is neither of
+  the above.
+
+Three failure modes, three different code paths, one `except` clause that has to handle all of them.
+
+> **Project status: scaffolding.** The documentation was written before the code, deliberately — see
+> [ADR-001](docs/DECISIONS.md#adr-001-contract-first). Implementation follows the phase order in
+> [CLAUDE.md §9](CLAUDE.md#9-build-order). Sections below marked _pending_ contain no measurements
+> yet, because no run has happened yet. Nothing in this repository quotes a number that a script
+> didn't produce.
+
+---
+
+## The four requirements, and where to look
+
+This project was built to a brief. Each requirement maps to a specific place in the code:
+
+| # | Requirement | Implemented in | Prove it with |
+|---|---|---|---|
+| 1 | Three containers named `us-east-1-endpoint`, `eu-west-1-endpoint`, `ap-southeast-1-endpoint`, plus Redis | `docker-compose.yml` (`container_name:` on each), `region/app/main.py` | `docker compose ps --format '{{.Name}}'` |
+| 2 | A Redis token bucket, decremented per IP per request, returning 429 at zero | `proxy/app/ratelimit/lua/token_bucket.lua` → `ratelimit/limiter.py` → `middleware/ratelimit_mw.py` | 30 requests in a loop → 20×`200` then 10×`429` |
+| 3 | Prioritise `us-east-1`; `httpx` with a ~200 ms timeout; wrapped in `try`/`except` | `proxy/app/router.py:ResilientRouter.route`, timeout built in `region_client.py:_build` | `make chaos-pause-us-east` → transition p50 ≈ 200 ms |
+| 4 | A script that runs `docker stop us-east-1-endpoint` during a flood; the `except` catches, logs, and routes to `eu-west-1` | `chaos/run.py`, `chaos/docker_ctl.py`, caught in `router.py`, logged as `upstream_failover` | `make chaos` |
+
+**On requirement 3 and 4 together:** a circuit breaker is the obvious improvement here, but it would
+open `us-east-1` after ~5 failures, meaning the `except` block fires for 5 of ~3000 requests during
+the flood and the graded behaviour becomes invisible. So `MRFP_MODE=literal` is the **default** — no
+breaker, no health poller, every request walks the priority list and really does hit the `except`.
+The breaker ships as an opt-in second mode, and `make chaos` runs both and reports the difference.
+Assertion **A13** fails the run if `upstream_failover` log lines drop below 95 % of the requests that
+failed over, so the requirement cannot silently rot.
+
+---
+
+## Architecture
+
+```mermaid
+flowchart LR
+  C[client / chaos flood] -->|POST /v1/infer| P
+  subgraph net["docker network mrfp-net · project mrfp"]
+    P["mrfp-proxy :8000<br/>FastAPI · uvicorn 1 worker"]
+    R[("redis :6380→6379<br/>cache-only, TTL'd keys")]
+    E1["us-east-1-endpoint :9001<br/>base 15ms · priority 1"]
+    E2["eu-west-1-endpoint :9002<br/>base 60ms · priority 2"]
+    E3["ap-southeast-1-endpoint :9003<br/>base 150ms · priority 3"]
+  end
+  P -->|EVALSHA token_bucket.lua| R
+  P -.->|"1st · connect 100ms / read 200ms"| E1
+  P -.->|"2nd on failure"| E2
+  P -.->|"3rd on failure"| E3
+```
+
+Regions carry simulated base latency (15 / 60 / 150 ms) so the priority order means something
+physically, and inference is deterministic across regions so a failover can be diffed without noise.
+
+---
+
+## Quickstart
+
+**Step 0 works with Docker stopped.** That's intentional — you get a green result before you fight
+any infrastructure.
+
+```bash
+make test-unit     # ~40 tests, no Docker, no Redis, no sockets. Should be green in seconds.
+```
+
+Then:
+
+```bash
+make doctor        # preflight: daemon, port conflicts, disk, architecture, make version
+make build         # first build is 3-6 minutes; it's separate from `up` on purpose
+make up            # start 5 containers, wait for healthy
+```
+
+Check it routes to the primary:
+
+```bash
+curl -si localhost:8000/v1/infer \
+  -H 'content-type: application/json' -d '{"prompt":"hello"}' \
+  | grep -E '^(HTTP|X-Served-By-Region|X-Attempts)'
+```
+
+```
+HTTP/1.1 200 OK
+X-Served-By-Region: us-east-1
+X-Attempts: 1
+```
+
+Kill the primary and watch it keep working:
+
+```bash
+docker stop us-east-1-endpoint
+curl -si localhost:8000/v1/infer \
+  -H 'content-type: application/json' -d '{"prompt":"hello"}' \
+  | grep -E '^(HTTP|X-Served-By-Region|X-Failover-Path)'
+```
+
+```
+HTTP/1.1 200 OK
+X-Served-By-Region: eu-west-1
+X-Failover-Path: us-east-1:connect_error(2.1ms),eu-west-1:ok(63.4ms)
+```
+
+Then run the real thing:
+
+```bash
+make chaos         # flood + docker stop + recovery, with assertions. Exits non-zero on regression.
+```
+
+---
+
+## The demo, in five beats
+
+If you're showing this to someone, this is the order that lands.
+
+1. **`make chaos`** — a request flood is running, a region gets killed mid-flight, and a per-second
+   timeline prints showing traffic move from `us-east-1` to `eu-west-1` in one second and back after
+   recovery. Every assertion prints PASS/FAIL and the process exits non-zero if any failed.
+2. **`docker compose logs proxy | jq -c 'select(.event=="upstream_failover")'`** — the `except` block,
+   caught red-handed, with the exception class and the elapsed time. `error_class` is
+   `ConnectError`, not a timeout. That surprises people.
+3. **`make chaos-pause-us-east`** — same experiment with `docker pause` instead of `stop`. Now the
+   transition p50 sits at ~200 ms because this one *is* a timeout. Two failure modes, visibly
+   different latency signatures, one code path.
+4. **The 429 loop** — 30 requests, 20 succeed, 10 are rejected; then
+   `redis-cli -p 6380 HGETALL 'rl:v1:{ip:127.0.0.1}:burst'` shows the bucket with *fractional*
+   tokens, which is a small detail with a long explanation ([LEARNING.md](docs/LEARNING.md)).
+5. **Stop all three regions** — clean `503` with `X-Failover-Path` showing all three attempts, and
+   the proxy itself still answers `/healthz`. Degrading is not the same as crashing.
+
+---
+
+## Results
+
+_Pending — no chaos run has been executed yet._
+
+Once `make chaos` runs, [docs/CHAOS-REPORT.md](docs/CHAOS-REPORT.md) is regenerated from the raw
+artifacts. Only the regions between `AUTOGEN` markers are rewritten, so the prose survives and the
+numbers can't be hand-edited. If you see a measurement anywhere in this repository, a script put it
+there.
+
+---
+
+## Worth reading, in order
+
+1. [docs/CONTRACT.md](docs/CONTRACT.md) — every name that crosses a boundary, frozen before the code
+2. `proxy/app/router.py` — the failover loop
+3. `proxy/app/failures.py` — the exception taxonomy, and what each failure *means*
+4. `proxy/app/ratelimit/lua/token_bucket.lua` — atomic refill/decide/debit/expire in one round trip
+5. `chaos/run.py` — the harness and its assertions
+6. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the reasoning behind all of the above
+
+---
+
+## Configuration
+
+Everything is `MRFP_`-prefixed. Full table in [docs/CONTRACT.md §2](docs/CONTRACT.md#2-configuration).
+The ones you'd actually change:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `MRFP_MODE` | `literal` | `resilient` enables the circuit breaker |
+| `MRFP_READ_TIMEOUT_MS` | `200` | The brief's number |
+| `MRFP_TOTAL_BUDGET_MS` | `900` | Ceiling across all failover attempts |
+| `MRFP_RL_CAPACITY` | `20` | Token bucket size |
+| `MRFP_RL_REFILL_PER_SEC` | `20` | Refill rate |
+| `MRFP_RL_FAIL_MODE` | `open` | Posture when Redis is unreachable |
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `Cannot connect to the Docker daemon` | Docker Desktop isn't running | `open -a Docker`, wait ~30 s, `make doctor` |
+| Redis container won't bind | A native `redis-server` already owns 6379 | Nothing to fix — ours publishes on **6380** by design |
+| `make chaos` says PASS but something looked wrong | macOS ships GNU Make 3.81, where `.SHELLFLAGS` is silently ignored | Already handled: recipes delegate to `ops/scripts/*.sh`. If you add a target, follow that pattern |
+| Everything 429s during a demo | All requests share one bucket — the proxy sees the Docker bridge gateway as the peer | `curl localhost:8000/debug/whoami` to see the resolved identity; use the chaos bypass token for load runs |
+| Every request takes ~200 ms after a region dies | Expected in `literal` mode — that's the cost the breaker exists to remove | Re-run with `MRFP_MODE=resilient` to see the difference |
+| A region "won't die" during chaos | uvicorn graceful shutdown waiting on keep-alive sockets | Regions set `--timeout-graceful-shutdown 0`; check it survived an edit |
+| Containers are slow and timings flap | An image got built for the wrong architecture | This is arm64; never set `platform: linux/amd64` |
+
+---
+
+## Documentation
+
+| File | What it's for |
+|---|---|
+| [docs/CONTRACT.md](docs/CONTRACT.md) | Frozen names, schemas, ports, log vocabulary. The source of truth. |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Request lifecycle, failure taxonomy, timeout arithmetic, why Lua. |
+| [docs/RUNBOOK.md](docs/RUNBOOK.md) | Operating it: every command, every scenario, reading the logs. |
+| [docs/DECISIONS.md](docs/DECISIONS.md) | ADRs — the contested calls and what was traded away. |
+| [docs/CHAOS-REPORT.md](docs/CHAOS-REPORT.md) | Measured results. Generated, not written. |
+| [docs/LEARNING.md](docs/LEARNING.md) | The concepts, explained: token buckets, timeouts, breakers, chaos. |
+| [CLAUDE.md](CLAUDE.md) | Context for AI agents working in this repo. |

@@ -1,0 +1,27 @@
+# --- secrets / local config -------------------------------------------------
+.env
+.env.local
+*.local
+
+# --- python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# --- chaos run output -------------------------------------------------------
+# The directory is tracked (via .gitkeep); its contents are generated.
+artifacts/*
+!artifacts/.gitkeep
+!artifacts/README.md
+
+# --- os / editor ------------------------------------------------------------
+.DS_Store
+.idea/
+*.swp
