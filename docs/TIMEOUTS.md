@@ -127,18 +127,41 @@ Measured against `llama3.2:3b` — TTFT ~600-690 ms, ~18-23 ms per token, p99 of
 
 | setting | shipped guess | derived from measurement |
 |---|---|---|
-| `MRFP_READ_TIMEOUT_MS` | 30000 | **29734** |
-| `MRFP_TOTAL_BUDGET_MS` | 64000 | **59668** |
+| `MRFP_READ_TIMEOUT_MS` | 30000 | **29845** |
+| `MRFP_TOTAL_BUDGET_MS` | 64000 | **59890** |
 
-The guess was **right**, within 1%. That is a genuinely good outcome and it is
-worth being precise about what changed: the numbers did not move, but they
-stopped being assertions. `make calibrate-check` now fails if either drifts
-below what the backend needs, and re-deriving against your own hardware is one
-command.
+The guess was **right**, within 1% — **at concurrency 1**. That qualification is
+the whole story, and it is not a small one.
 
-It also shows how far these numbers travel. A 0.5B model wanted ~8 s; a 3B model
-wants ~30 s. Model size moved the requirement by 4x, which is exactly why this
-is a command and not a constant.
+### Concurrency changes the answer by more than model size does
+
+`--concurrency` defaults to 1, which measures *service* latency: the floor a
+per-attempt timeout must clear. Against a backend that queues, that default is a
+**trap** — calibrate a shared endpoint while it is idle and you derive a timeout
+that is too small at exactly the moment it matters.
+
+Same model, same host, same sweep — a lighter one (`--samples 3`) run twice back
+to back, so the absolute figures differ slightly from the table above. Only
+concurrency changed between the two rows:
+
+| concurrency | ms/token | p99 @ 512 tokens | derived `read_timeout_ms` |
+|---|---|---|---|
+| 1 | 14.9 | 8.4 s | **24189** |
+| 4 | 42.2 | 35.7 s | **80042** |
+
+**3.3x**, from contention alone. Model size moved the requirement 4x (0.5B wanted
+~8 s, 3B wants ~30 s); concurrency moved it almost as much. So the shipped 30000
+is right for a backend serving roughly one request at a time and is **2.6x too
+small** for the same backend at four.
+
+The rule that follows: **calibrate at the peak concurrency you expect per
+region**, not at idle. A latency figure without the concurrency it was measured
+at is not reproducible, so the report records it and so does this table.
+
+What changed overall is not that the numbers moved — they did not — but that
+they stopped being assertions. `make calibrate-check` fails if either drifts
+below what the backend needs, and re-deriving against your own hardware and your
+own load is one command.
 
 ## Measured
 
@@ -148,6 +171,7 @@ is a command and not a constant.
 | backend | `upstream` |
 | model(s) | `llama3.2:3b` |
 | samples per step | 4 |
+| concurrency | 1 |
 | token steps | 8, 32, 128, 512 |
 
 <!-- AUTOGEN:END -->
@@ -157,9 +181,9 @@ is a command and not a constant.
 <!-- AUTOGEN:BEGIN:calibration-table -->
 | region | TTFT | ms/token | p99 @ 8 | p99 @ 32 | p99 @ 128 | p99 @ 512 |
 |---|---|---|---|---|---|---|
-| us-east-1 | 686.3 ms | 17.724 | 455.3 ms | 1226.0 ms | 3885.6 ms | 14866.5 ms |
-| eu-west-1 | 577.9 ms | 23.319 | 389.5 ms | 1281.5 ms | 4382.9 ms | 13970.8 ms |
-| ap-southeast-1 | 690.6 ms | 19.728 | 519.1 ms | 1094.5 ms | 4884.1 ms | 12727.2 ms |
+| us-east-1 | 491.9 ms | 22.004 | 502.2 ms | 1154.0 ms | 3883.9 ms | 14922.4 ms |
+| eu-west-1 | 621.1 ms | 19.923 | 395.5 ms | 1149.8 ms | 3934.3 ms | 14259.1 ms |
+| ap-southeast-1 | 1995.2 ms | 22.644 | 482.8 ms | 2221.8 ms | 8700.3 ms | 13638.7 ms |
 <!-- AUTOGEN:END -->
 
 ### Capability ceiling at the shipped read timeout
@@ -177,13 +201,13 @@ At `read_timeout_ms=200`, against an API that accepts up to `max_tokens=512`:
 ### Derived settings
 
 <!-- AUTOGEN:BEGIN:calibration-derived -->
-Worst p99 across all regions and token counts: **14866.55 ms**. Streaming inter-chunk gap p99: **41.25 ms** over 384 chunks.
+Worst p99 across all regions and token counts: **14922.39 ms**. Streaming inter-chunk gap p99: **50.57 ms** over 384 chunks.
 
 At 2.0x headroom:
 
 ```
-MRFP_READ_TIMEOUT_MS              = 29734
-MRFP_TOTAL_BUDGET_MS              = 59668
+MRFP_READ_TIMEOUT_MS              = 29845
+MRFP_TOTAL_BUDGET_MS              = 59890
 MRFP_STREAM_INTER_CHUNK_TIMEOUT_S = 1.0
 ```
 <!-- AUTOGEN:END -->

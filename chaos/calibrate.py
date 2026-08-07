@@ -27,9 +27,12 @@ them `backend=mock`. The regions grow a real-upstream passthrough
 real model and produce numbers worth deploying. A tool that measures the mock
 is not evidence about production; a tool that can measure production is.
 
-Measured at low concurrency on purpose: this is SERVICE latency, the thing a
-per-attempt timeout must accommodate. Latency under load is a different
-question, and `chaos/capacity.py` answers it.
+CONCURRENCY. Defaults to 1, which measures SERVICE latency — the floor a
+per-attempt timeout must accommodate. That default is a TRAP when the backend is
+shared: calibrate a hosted endpoint while it is idle and you derive a timeout
+that is too small the moment it queues, which is precisely the moment it
+matters. `--concurrency N` overlaps requests so the measured p99 includes
+queueing. Set it to the peak concurrency you expect per region.
 """
 
 from __future__ import annotations
@@ -162,23 +165,40 @@ def plan(samples: int) -> tuple[int, int]:
 
 
 async def probe_region(
-    client: httpx.AsyncClient, profile: RegionProfile, port: int, samples: int
+    client: httpx.AsyncClient,
+    profile: RegionProfile,
+    port: int,
+    samples: int,
+    concurrency: int = 1,
 ) -> RegionProfile:
     base = f"http://127.0.0.1:{port}"
+    gate = asyncio.Semaphore(concurrency)
 
     for tokens in TOKEN_STEPS:
         step = Step(max_tokens=tokens)
         # One warm-up, discarded: the first request pays connection setup, which
         # a per-attempt read timeout on a warm pool never sees.
         await client.post(f"{base}/v1/infer", json={"prompt": "calibrate", "max_tokens": tokens})
-        for _ in range(samples):
-            t0 = time.perf_counter()
-            response = await client.post(
-                f"{base}/v1/infer", json={"prompt": "calibrate", "max_tokens": tokens}
-            )
-            elapsed = (time.perf_counter() - t0) * 1000
-            if response.status_code == 200:
-                step.samples.append(elapsed)
+
+        # BOTH loop variables bound as defaults. `tokens` alone is not enough:
+        # a closure over `step` reads whatever the loop last assigned, which is
+        # only harmless here because the gather is awaited inside the same
+        # iteration — exactly the kind of accident that survives until someone
+        # moves the await.
+        async def one(tokens: int = tokens, step: Step = step) -> None:
+            async with gate:
+                t0 = time.perf_counter()
+                response = await client.post(
+                    f"{base}/v1/infer", json={"prompt": "calibrate", "max_tokens": tokens}
+                )
+                elapsed = (time.perf_counter() - t0) * 1000
+                if response.status_code == 200:
+                    step.samples.append(elapsed)
+
+        # At concurrency 1 this is exactly the old sequential sweep. Above it,
+        # requests overlap and the measured p99 starts including QUEUEING —
+        # which is the number a contended backend actually imposes.
+        await asyncio.gather(*(one() for _ in range(samples)))
         profile.steps.append(step)
 
     profile.stream_gaps_ms = await probe_stream_gaps(client, base)
@@ -330,7 +350,9 @@ async def run(args: argparse.Namespace) -> int:
         profiles = []
         for profile, port in discovered:
             print(f"  probing {profile.region} on :{port} ...", flush=True)
-            profiles.append(await probe_region(client, profile, port, args.samples))
+            profiles.append(
+                await probe_region(client, profile, port, args.samples, args.concurrency)
+            )
 
     derived = derive(profiles, args.attempts, args.connect_ms)
 
@@ -341,6 +363,7 @@ async def run(args: argparse.Namespace) -> int:
         "backend": "mixed" if len(backends) > 1 else backends.pop(),
         "models": sorted({prof.model for prof in profiles}),
         "samples_per_step": args.samples,
+        "concurrency": args.concurrency,
         "token_steps": list(TOKEN_STEPS),
         "regions": [
             {
@@ -416,7 +439,8 @@ async def run(args: argparse.Namespace) -> int:
 def _render(report: dict) -> str:
     lines = [
         "",
-        f"backend: {report['backend']}  models: {', '.join(report['models'])}",
+        f"backend: {report['backend']}  models: {', '.join(report['models'])}  "
+        f"concurrency: {report['concurrency']}",
         "",
         f"{'region':<16}{'ttft':>9}{'ms/tok':>9}"
         + "".join(f"{'p99@' + str(t):>11}" for t in report["token_steps"]),
@@ -474,6 +498,7 @@ def doc_blocks(report: dict) -> dict[str, str]:
         f"| backend | `{report['backend']}` |\n"
         f"| model(s) | {', '.join('`' + m + '`' for m in report['models'])} |\n"
         f"| samples per step | {report['samples_per_step']} |\n"
+        f"| concurrency | {report['concurrency']} |\n"
         f"| token steps | {', '.join(str(t) for t in report['token_steps'])} |\n"
     )
 
@@ -560,6 +585,17 @@ def write_doc(report: dict) -> Path:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--samples", type=int, default=20, help="requests per token step")
+    ap.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help=(
+            "simultaneous requests. 1 measures SERVICE latency. Raise it to the "
+            "peak concurrency you expect: a backend that queues imposes a much "
+            "larger p99, and calibrating a shared endpoint at idle under-sizes "
+            "the timeout for exactly the moment it matters."
+        ),
+    )
     ap.add_argument(
         "--yes",
         action="store_true",

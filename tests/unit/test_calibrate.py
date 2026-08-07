@@ -182,3 +182,35 @@ def test_the_refusal_is_wired_and_exits_nonzero() -> None:
     assert "REFUSING" in body
     assert "if live and not args.yes:" in body
     assert "return 2" in body
+
+
+# --- calibrating an idle backend under-sizes the timeout --------------------
+
+
+def test_concurrency_defaults_to_one_and_is_documented_as_a_trap() -> None:
+    """Concurrency 1 measures SERVICE latency, which is the right floor — and
+    the wrong number for a shared backend. Calibrate a hosted endpoint while it
+    is idle and the derived timeout is too small the moment it queues, which is
+    exactly when it matters. The default stays 1 (reproducible, cheap); the
+    docstring and --help both have to say why that is dangerous."""
+    body = (ROOT / "chaos" / "calibrate.py").read_text()
+    assert '"--concurrency",' in body
+    assert "default=1," in body
+    assert "under-sizes" in body
+
+
+def test_the_sweep_binds_both_loop_variables() -> None:
+    """ruff B023 caught this: `one()` closed over the loop's `step`, so it read
+    whatever the loop had last assigned. Harmless only because the gather is
+    awaited inside the same iteration — an accident that survives until someone
+    moves the await."""
+    body = (ROOT / "chaos" / "calibrate.py").read_text()
+    assert "async def one(tokens: int = tokens, step: Step = step)" in body
+
+
+def test_concurrency_is_recorded_in_the_report() -> None:
+    """A latency number without the concurrency it was measured at is not
+    reproducible, and two runs at different concurrency are not comparable."""
+    body = (ROOT / "chaos" / "calibrate.py").read_text()
+    assert '"concurrency": args.concurrency,' in body
+    assert "| concurrency |" in body

@@ -811,8 +811,17 @@ caught a misconfiguration I had just written by hand, which is exactly the case 
 and 64000. Within 1%.
 
 The numbers did not move; they stopped being assertions. Note also how far they travel: a 0.5B model
-wanted ~8 s and a 3B model wants ~30 s, so model size moved the requirement 4x. That is precisely why
-this is a command and not a constant.
+wanted ~8 s and a 3B model wants ~30 s, so model size moved the requirement 4x.
+
+**And concurrency moves it almost as much, which qualifies the result above.** The tool measured at
+concurrency 1 — service latency, the right floor. Re-run at concurrency 4 against the same model on
+the same host, the derived requirement goes from 24189 ms to **80042 ms**: 3.3x, from contention
+alone. So "the guess was right" holds for a backend serving roughly one request at a time, and the
+shipped 30000 is **2.6x too small** for the same backend at four.
+
+That makes the default a trap for the exact use it was recommended for — calibrating a shared hosted
+endpoint while it happens to be idle. `--concurrency N` exists for that, `--help` says why, and the
+report records the concurrency because a latency figure without it is not reproducible.
 
 **And the tool caught itself.** The first real run reported
 `MRFP_STREAM_INTER_CHUNK_TIMEOUT_S = 1.0` derived from **zero** stream samples: the passthrough did
