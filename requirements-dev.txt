@@ -1,0 +1,14 @@
+# Host virtualenv (python3.13) for chaos/ and tests/.
+#
+# Pure-Python only, on purpose: nothing here needs to compile, so `make venv`
+# cannot fail on a missing wheel. Anything that imports the proxy or region app
+# runs inside a container instead. (ADR-015)
+
+httpx==0.28.1
+pytest==8.3.4
+pytest-asyncio==0.25.2
+respx==0.22.0
+redis==5.2.1
+PyYAML==6.0.2
+rich==13.9.4
+ruff==0.9.6

@@ -1,0 +1,50 @@
+# The region registry — the ONLY place regions are defined.
+#
+# Order in this file is the failover order. It can be overridden at runtime with
+# MRFP_REGION_PRIORITY (comma-separated ids), which is the only supported way to
+# reorder — see docs/CONTRACT.md §2.
+#
+# container names are load-bearing: the chaos harness runs
+# `docker stop us-east-1-endpoint` literally, exactly as the brief specifies.
+
+version: 1
+
+regions:
+  - id: us-east-1
+    zone: us-east-1a
+    priority: 1
+    container: us-east-1-endpoint
+    # In-network address. NEVER localhost — inside the proxy container that is
+    # the proxy itself. Host ports 9001-9003 exist only for manual curl.
+    base_url: http://us-east-1-endpoint:8080
+    host_port: 9001
+    # Simulated service latency, so the priority order is physically meaningful
+    # and failover has a measurable cost.
+    base_latency_ms: 15
+    jitter_ms: 5
+
+  - id: eu-west-1
+    zone: eu-west-1b
+    priority: 2
+    container: eu-west-1-endpoint
+    base_url: http://eu-west-1-endpoint:8080
+    host_port: 9002
+    base_latency_ms: 60
+    jitter_ms: 10
+
+  - id: ap-southeast-1
+    zone: ap-southeast-1c
+    priority: 3
+    container: ap-southeast-1-endpoint
+    base_url: http://ap-southeast-1-endpoint:8080
+    host_port: 9003
+    base_latency_ms: 150
+    jitter_ms: 20
+
+# Per-region client tuning. One httpx.AsyncClient per region: a shared client's
+# max_connections is a global cap across all hosts, so one blackholed region
+# would exhaust the pool and cause PoolTimeout against healthy ones.
+client_defaults:
+  max_connections: 64
+  max_keepalive_connections: 32
+  keepalive_expiry_s: 30
