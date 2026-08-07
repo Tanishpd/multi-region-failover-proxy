@@ -34,7 +34,7 @@ RUFF    := $(VENV)/bin/ruff
 .PHONY: help doctor venv build up up-regions down ps health logs \
         test-unit test lint fmt docs-check chaos report bench reset clean \
         prod-config prod-up prod-down capacity calibrate calibrate-check \
-        redis-ha-up redis-ha-down redis-ha-drill redis-ha-e2e
+        redis-ha-up redis-ha-down redis-ha-drill redis-ha-e2e soak
 
 # --- meta -------------------------------------------------------------------
 
@@ -110,6 +110,12 @@ bench:
 
 capacity:
 	@bash ops/scripts/capacity.sh
+
+# Production-shaped traffic from a committed dataset: many tenants, a real
+# max_tokens mix, streaming and buffered together, and a noisy neighbour that
+# must be throttled WITHOUT touching anyone else.
+soak:
+	@bash ops/scripts/soak.sh
 
 # Derive the timeouts from measurement rather than asserting them. `-check`
 # exits non-zero when a configured timeout is below the measured requirement.

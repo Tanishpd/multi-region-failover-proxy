@@ -402,3 +402,39 @@ def test_readyz_reports_the_limiter_without_gating_on_it() -> None:
     section = body[start : start + 1600]
     assert "status_code=200 if usable else 503" in section, "readiness must still hinge on regions"
     assert "rate_limit_backend_up() else" in section
+
+
+# --- the soak's own preconditions (ADR-030) ---------------------------------
+
+
+def test_the_soak_refuses_to_run_without_per_tenant_identity() -> None:
+    """Every tenant resolving to one bucket would make the isolation assertion
+    pass vacuously — the single most important thing the soak measures."""
+    body = (ROOT / "ops" / "scripts" / "soak.sh").read_text()
+    assert "Refusing to report a result" in body
+    assert "resolved_client_ip" in body
+
+
+def test_the_soak_enables_streaming() -> None:
+    """With streaming off, a `stream: true` request is silently BUFFERED, and a
+    stream longer than read_timeout x 1.15 then dies with attempt_deadline
+    despite never stalling. Two 256-token streaming rows at 5ms/token = 1280ms
+    against a 1150ms ceiling produced every remaining 5xx."""
+    assert "MRFP_STREAMING_ENABLED=1" in (ROOT / "ops" / "scripts" / "soak.sh").read_text()
+
+
+def test_the_soak_does_not_mutate_the_graded_proxy() -> None:
+    """An earlier version restarted the graded proxy in place, which mutated the
+    demo stack and destroyed its logs on restore — and still could not change
+    the read timeout, because compose pins it as a literal."""
+    body = (ROOT / "ops" / "scripts" / "soak.sh").read_text()
+    assert "mrfp-proxy-soak" in body
+    assert "docker compose up -d mrfp-proxy" not in body
+
+
+def test_soak_availability_is_a_fleet_metric() -> None:
+    """Per tenant over ~60 requests, one failure is already 1.7% — a per-tenant
+    99.5% bar is 'zero errors' wearing an SLO's clothes."""
+    body = code_only(ROOT / "chaos" / "soak.py")
+    assert "fleet availability" in body
+    assert "fleet_ok / fleet_total" in body

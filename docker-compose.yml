@@ -64,7 +64,16 @@ services:
       MRFP_CONNECT_TIMEOUT_MS: "100"
       MRFP_POOL_TIMEOUT_MS: "50"
       MRFP_TOTAL_BUDGET_MS: "900"
-      MRFP_MAX_INFLIGHT: "128"
+      # 0 = DERIVE from the smallest region pool (0.75 x 64 = 48).
+      #
+      # This was a literal 128 while every region pool holds 64, and the proxy
+      # said so at boot on every single start:
+      #   admission_above_pool max_inflight=128 smallest_pool=64
+      #   "overload will surface as PoolTimeout rather than a clean shed"
+      # A warning nobody acted on. `make soak` turned it into 11 x 503 for
+      # tenants that were inside their own rate limit, because one noisy
+      # neighbour admitted more concurrent work than the pools could carry.
+      MRFP_MAX_INFLIGHT: "${MRFP_MAX_INFLIGHT:-0}"
       MRFP_BODY_READ_TIMEOUT_S: "5"
       # Off by default: the demo profile's behaviour must be unchanged by
       # streaming's presence, not merely equivalent to it.

@@ -1,0 +1,120 @@
+{"id": "wl-000", "prompt": "Explain an idempotency key with a worked example", "max_tokens": 8, "stream": false}
+{"id": "wl-001", "prompt": "Compare a read replica as a bulleted list", "max_tokens": 4, "stream": false}
+{"id": "wl-002", "prompt": "Describe the failure modes of a cache focusing on what goes wrong under load", "max_tokens": 16, "stream": false}
+{"id": "wl-003", "prompt": "Summarise a load balancer", "max_tokens": 256, "stream": false}
+{"id": "wl-004", "prompt": "Explain a connection pool focusing on what goes wrong under load", "max_tokens": 16, "stream": false}
+{"id": "wl-005", "prompt": "Explain a connection pool for a junior engineer", "max_tokens": 32, "stream": false}
+{"id": "wl-006", "prompt": "Summarise an idempotency key as a bulleted list", "max_tokens": 4, "stream": true}
+{"id": "wl-007", "prompt": "Summarise a token bucket in one paragraph", "max_tokens": 8, "stream": true}
+{"id": "wl-008", "prompt": "Summarise a load balancer for a junior engineer", "max_tokens": 16, "stream": false}
+{"id": "wl-009", "prompt": "List the tradeoffs of a message queue for a junior engineer", "max_tokens": 16, "stream": false}
+{"id": "wl-010", "prompt": "List the tradeoffs of a message queue as a bulleted list", "max_tokens": 8, "stream": false}
+{"id": "wl-011", "prompt": "Critique a canary deploy as a bulleted list", "max_tokens": 8, "stream": false}
+{"id": "wl-012", "prompt": "List the tradeoffs of a token bucket in one paragraph", "max_tokens": 4, "stream": false}
+{"id": "wl-013", "prompt": "Summarise a health check with a worked example", "max_tokens": 32, "stream": false}
+{"id": "wl-014", "prompt": "Describe the failure modes of a health check", "max_tokens": 16, "stream": false}
+{"id": "wl-015", "prompt": "Write a runbook entry for a message queue focusing on what goes wrong under load", "max_tokens": 128, "stream": false}
+{"id": "wl-016", "prompt": "Summarise a token bucket as a bulleted list", "max_tokens": 32, "stream": false}
+{"id": "wl-017", "prompt": "Explain a circuit breaker focusing on what goes wrong under load", "max_tokens": 4, "stream": false}
+{"id": "wl-018", "prompt": "Critique a health check in one paragraph", "max_tokens": 16, "stream": false}
+{"id": "wl-019", "prompt": "Summarise a read replica focusing on what goes wrong under load", "max_tokens": 16, "stream": false}
+{"id": "wl-020", "prompt": "Explain a load balancer for a junior engineer", "max_tokens": 64, "stream": false}
+{"id": "wl-021", "prompt": "List the tradeoffs of a canary deploy", "max_tokens": 16, "stream": false}
+{"id": "wl-022", "prompt": "Summarise a message queue focusing on what goes wrong under load", "max_tokens": 16, "stream": false}
+{"id": "wl-023", "prompt": "Critique a circuit breaker as a bulleted list", "max_tokens": 8, "stream": false}
+{"id": "wl-024", "prompt": "Compare a token bucket focusing on what goes wrong under load", "max_tokens": 256, "stream": false}
+{"id": "wl-025", "prompt": "List the tradeoffs of a health check focusing on what goes wrong under load", "max_tokens": 128, "stream": false}
+{"id": "wl-026", "prompt": "Summarise a cache for a junior engineer", "max_tokens": 16, "stream": false}
+{"id": "wl-027", "prompt": "Write a runbook entry for a cache for a junior engineer", "max_tokens": 256, "stream": true}
+{"id": "wl-028", "prompt": "Compare a feature flag as a bulleted list", "max_tokens": 8, "stream": true}
+{"id": "wl-029", "prompt": "Write a runbook entry for a circuit breaker for a junior engineer", "max_tokens": 32, "stream": false}
+{"id": "wl-030", "prompt": "Describe the failure modes of a connection pool in one paragraph", "max_tokens": 4, "stream": false}
+{"id": "wl-031", "prompt": "Summarise a cache", "max_tokens": 8, "stream": false}
+{"id": "wl-032", "prompt": "Write a runbook entry for a health check as a bulleted list", "max_tokens": 4, "stream": false}
+{"id": "wl-033", "prompt": "Summarise a connection pool focusing on what goes wrong under load", "max_tokens": 16, "stream": false}
+{"id": "wl-034", "prompt": "Critique a cache as a bulleted list", "max_tokens": 16, "stream": false}
+{"id": "wl-035", "prompt": "Compare a health check focusing on what goes wrong under load", "max_tokens": 8, "stream": false}
+{"id": "wl-036", "prompt": "Explain a token bucket in one paragraph", "max_tokens": 4, "stream": true}
+{"id": "wl-037", "prompt": "Summarise an idempotency key with a worked example", "max_tokens": 8, "stream": false}
+{"id": "wl-038", "prompt": "Summarise a load balancer for a junior engineer", "max_tokens": 64, "stream": false}
+{"id": "wl-039", "prompt": "Explain a connection pool with a worked example", "max_tokens": 16, "stream": false}
+{"id": "wl-040", "prompt": "Critique a feature flag in one paragraph", "max_tokens": 128, "stream": false}
+{"id": "wl-041", "prompt": "Critique a connection pool in one paragraph", "max_tokens": 16, "stream": true}
+{"id": "wl-042", "prompt": "Summarise a token bucket in one paragraph", "max_tokens": 16, "stream": false}
+{"id": "wl-043", "prompt": "Compare a health check in one paragraph", "max_tokens": 4, "stream": false}
+{"id": "wl-044", "prompt": "Summarise an idempotency key focusing on what goes wrong under load", "max_tokens": 16, "stream": false}
+{"id": "wl-045", "prompt": "Compare a retry budget focusing on what goes wrong under load", "max_tokens": 16, "stream": false}
+{"id": "wl-046", "prompt": "Explain a read replica focusing on what goes wrong under load", "max_tokens": 16, "stream": false}
+{"id": "wl-047", "prompt": "Critique a connection pool in one paragraph", "max_tokens": 64, "stream": false}
+{"id": "wl-048", "prompt": "Describe the failure modes of a feature flag focusing on what goes wrong under load", "max_tokens": 256, "stream": false}
+{"id": "wl-049", "prompt": "Write a runbook entry for a message queue in one paragraph", "max_tokens": 16, "stream": false}
+{"id": "wl-050", "prompt": "Compare a load balancer with a worked example", "max_tokens": 4, "stream": false}
+{"id": "wl-051", "prompt": "Compare a connection pool focusing on what goes wrong under load", "max_tokens": 4, "stream": false}
+{"id": "wl-052", "prompt": "Summarise a feature flag as a bulleted list", "max_tokens": 4, "stream": true}
+{"id": "wl-053", "prompt": "Summarise a connection pool as a bulleted list", "max_tokens": 8, "stream": true}
+{"id": "wl-054", "prompt": "Explain a retry budget for a junior engineer", "max_tokens": 8, "stream": false}
+{"id": "wl-055", "prompt": "Describe the failure modes of a cache focusing on what goes wrong under load", "max_tokens": 4, "stream": false}
+{"id": "wl-056", "prompt": "List the tradeoffs of a message queue focusing on what goes wrong under load", "max_tokens": 4, "stream": false}
+{"id": "wl-057", "prompt": "Critique a load balancer focusing on what goes wrong under load", "max_tokens": 8, "stream": true}
+{"id": "wl-058", "prompt": "Summarise a load balancer for a junior engineer", "max_tokens": 64, "stream": false}
+{"id": "wl-059", "prompt": "Summarise a cache focusing on what goes wrong under load", "max_tokens": 16, "stream": false}
+{"id": "wl-060", "prompt": "List the tradeoffs of a health check focusing on what goes wrong under load", "max_tokens": 32, "stream": false}
+{"id": "wl-061", "prompt": "Critique a cache focusing on what goes wrong under load", "max_tokens": 4, "stream": false}
+{"id": "wl-062", "prompt": "Summarise an idempotency key as a bulleted list", "max_tokens": 4, "stream": false}
+{"id": "wl-063", "prompt": "Critique a cache as a bulleted list", "max_tokens": 8, "stream": false}
+{"id": "wl-064", "prompt": "Describe the failure modes of a connection pool focusing on what goes wrong under load", "max_tokens": 4, "stream": false}
+{"id": "wl-065", "prompt": "Describe the failure modes of a connection pool as a bulleted list", "max_tokens": 32, "stream": true}
+{"id": "wl-066", "prompt": "Summarise a token bucket with a worked example", "max_tokens": 32, "stream": false}
+{"id": "wl-067", "prompt": "Summarise a message queue in one paragraph", "max_tokens": 16, "stream": false}
+{"id": "wl-068", "prompt": "List the tradeoffs of a connection pool as a bulleted list", "max_tokens": 16, "stream": false}
+{"id": "wl-069", "prompt": "Write a runbook entry for an idempotency key for a junior engineer", "max_tokens": 256, "stream": true}
+{"id": "wl-070", "prompt": "Describe the failure modes of a connection pool in one paragraph", "max_tokens": 64, "stream": false}
+{"id": "wl-071", "prompt": "Write a runbook entry for a canary deploy with a worked example", "max_tokens": 64, "stream": false}
+{"id": "wl-072", "prompt": "Summarise a health check focusing on what goes wrong under load", "max_tokens": 16, "stream": false}
+{"id": "wl-073", "prompt": "Describe the failure modes of a circuit breaker focusing on what goes wrong under load", "max_tokens": 4, "stream": true}
+{"id": "wl-074", "prompt": "Summarise an idempotency key with a worked example", "max_tokens": 8, "stream": false}
+{"id": "wl-075", "prompt": "Compare a connection pool focusing on what goes wrong under load", "max_tokens": 32, "stream": false}
+{"id": "wl-076", "prompt": "List the tradeoffs of a canary deploy for a junior engineer", "max_tokens": 64, "stream": true}
+{"id": "wl-077", "prompt": "Critique a cache with a worked example", "max_tokens": 16, "stream": false}
+{"id": "wl-078", "prompt": "Critique a circuit breaker with a worked example", "max_tokens": 4, "stream": false}
+{"id": "wl-079", "prompt": "Write a runbook entry for a message queue focusing on what goes wrong under load", "max_tokens": 4, "stream": false}
+{"id": "wl-080", "prompt": "Explain a connection pool in one paragraph", "max_tokens": 16, "stream": false}
+{"id": "wl-081", "prompt": "Critique an idempotency key with a worked example", "max_tokens": 16, "stream": false}
+{"id": "wl-082", "prompt": "List the tradeoffs of a canary deploy in one paragraph", "max_tokens": 16, "stream": false}
+{"id": "wl-083", "prompt": "Explain a health check with a worked example", "max_tokens": 32, "stream": false}
+{"id": "wl-084", "prompt": "Describe the failure modes of a load balancer in one paragraph", "max_tokens": 32, "stream": false}
+{"id": "wl-085", "prompt": "Explain a token bucket focusing on what goes wrong under load", "max_tokens": 16, "stream": false}
+{"id": "wl-086", "prompt": "Summarise a canary deploy for a junior engineer", "max_tokens": 16, "stream": false}
+{"id": "wl-087", "prompt": "Compare a feature flag as a bulleted list", "max_tokens": 64, "stream": false}
+{"id": "wl-088", "prompt": "Compare a token bucket for a junior engineer", "max_tokens": 8, "stream": false}
+{"id": "wl-089", "prompt": "Explain a health check in one paragraph", "max_tokens": 4, "stream": false}
+{"id": "wl-090", "prompt": "Describe the failure modes of an idempotency key as a bulleted list", "max_tokens": 8, "stream": false}
+{"id": "wl-091", "prompt": "Describe the failure modes of a canary deploy in one paragraph", "max_tokens": 4, "stream": false}
+{"id": "wl-092", "prompt": "Compare a load balancer in one paragraph", "max_tokens": 32, "stream": false}
+{"id": "wl-093", "prompt": "Summarise a message queue for a junior engineer", "max_tokens": 16, "stream": false}
+{"id": "wl-094", "prompt": "Critique a load balancer focusing on what goes wrong under load", "max_tokens": 64, "stream": false}
+{"id": "wl-095", "prompt": "Critique a read replica in one paragraph", "max_tokens": 4, "stream": false}
+{"id": "wl-096", "prompt": "Critique an idempotency key with a worked example", "max_tokens": 4, "stream": false}
+{"id": "wl-097", "prompt": "List the tradeoffs of a token bucket focusing on what goes wrong under load", "max_tokens": 16, "stream": false}
+{"id": "wl-098", "prompt": "Describe the failure modes of a retry budget", "max_tokens": 8, "stream": false}
+{"id": "wl-099", "prompt": "Describe the failure modes of a connection pool in one paragraph", "max_tokens": 4, "stream": false}
+{"id": "wl-100", "prompt": "Describe the failure modes of a retry budget in one paragraph", "max_tokens": 64, "stream": false}
+{"id": "wl-101", "prompt": "Compare a retry budget with a worked example", "max_tokens": 8, "stream": false}
+{"id": "wl-102", "prompt": "Summarise a connection pool with a worked example", "max_tokens": 16, "stream": false}
+{"id": "wl-103", "prompt": "Critique a read replica for a junior engineer", "max_tokens": 8, "stream": false}
+{"id": "wl-104", "prompt": "Explain a canary deploy", "max_tokens": 32, "stream": false}
+{"id": "wl-105", "prompt": "Write a runbook entry for a feature flag with a worked example", "max_tokens": 64, "stream": false}
+{"id": "wl-106", "prompt": "Write a runbook entry for a health check for a junior engineer", "max_tokens": 32, "stream": false}
+{"id": "wl-107", "prompt": "Summarise a connection pool focusing on what goes wrong under load", "max_tokens": 8, "stream": false}
+{"id": "wl-108", "prompt": "Explain a message queue", "max_tokens": 4, "stream": false}
+{"id": "wl-109", "prompt": "List the tradeoffs of a health check", "max_tokens": 16, "stream": false}
+{"id": "wl-110", "prompt": "Write a runbook entry for a canary deploy in one paragraph", "max_tokens": 128, "stream": false}
+{"id": "wl-111", "prompt": "Describe the failure modes of a read replica with a worked example", "max_tokens": 32, "stream": false}
+{"id": "wl-112", "prompt": "Summarise a canary deploy in one paragraph", "max_tokens": 32, "stream": false}
+{"id": "wl-113", "prompt": "Critique a read replica for a junior engineer", "max_tokens": 8, "stream": false}
+{"id": "wl-114", "prompt": "Describe the failure modes of a cache with a worked example", "max_tokens": 16, "stream": false}
+{"id": "wl-115", "prompt": "Explain a retry budget as a bulleted list", "max_tokens": 64, "stream": false}
+{"id": "wl-116", "prompt": "List the tradeoffs of a circuit breaker in one paragraph", "max_tokens": 16, "stream": false}
+{"id": "wl-117", "prompt": "Write a runbook entry for a health check for a junior engineer", "max_tokens": 16, "stream": false}
+{"id": "wl-118", "prompt": "Summarise a load balancer for a junior engineer", "max_tokens": 256, "stream": false}
+{"id": "wl-119", "prompt": "Summarise a connection pool focusing on what goes wrong under load", "max_tokens": 16, "stream": false}

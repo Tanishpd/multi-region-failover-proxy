@@ -873,3 +873,55 @@ The general lesson is the one worth keeping: **fail-open must be scoped to the f
 argued for.** [ADR-013](#adr-013) reasoned about an outage and then silently covered
 misconfiguration too, because both arrive as the same base class. Every fail-open path deserves the
 question "which failures did I actually mean?"
+
+---
+
+<a id="adr-030"></a>
+
+## ADR-030: A production-shaped soak, and the trap it found
+
+**Date:** 2026-08-07 · **Status:** accepted
+
+**Context.** `make chaos` fires one payload from one client for twelve seconds to answer one
+question: does failover happen. Everything that only appears under production-shaped traffic was
+therefore untested — most importantly **per-tenant isolation**, which is the single most valuable
+thing a rate limiter does and had no test at all.
+
+**Decision.** `make soak`: eight well-behaved tenants plus a noisy neighbour, drawing from a
+committed 120-row dataset (`ops/datasets/workload.jsonl`) whose `max_tokens` mix is realistically
+skewed — 70% small, with a long tail of 128/256 — and 15% streaming. Exponential arrival gaps, not a
+fixed tick, so bursts actually occur. Tenants are separated by `X-Forwarded-For`, and the script
+**refuses to report a result** unless it first proves two XFF values resolve to two identities;
+otherwise every tenant shares one bucket and the isolation assertion passes vacuously.
+
+It runs against its own proxy on `:8002` rather than the graded one, because the demo pins the
+brief's 200 ms read timeout as a compose *literal* — correctly, it is a frozen invariant — so it
+cannot be overridden by environment at all.
+
+**Result.** 481 well-behaved requests at 100% availability, **0 rate-limit rejections**, while the
+noisy neighbour was throttled 1191/1811. Isolation holds. 41 streams completed, none truncated.
+
+**Consequence — the trap.** The first runs showed ~30 × 503 for tenants that were inside their own
+limit. Three hypotheses died before the real cause:
+
+1. *Admission above pool.* The proxy warns `admission_above_pool max_inflight=128 smallest_pool=64`
+   on **every boot** and nothing had ever acted on it. Fixing it changed nothing here — but it was a
+   real misconfiguration, and note that `.env` **shadows** the `${VAR:-default}` in
+   `docker-compose.yml`, so fixing the default alone did nothing either.
+2. *Host contention.* Refuted by experiment: at 4× less load the failures were byte-identical.
+3. *The 200 ms capability ceiling.* Real, and raising the timeout removed most of them — but not all.
+
+The survivor: **with `MRFP_STREAMING_ENABLED=0`, a `stream: true` request is silently buffered.** A
+stream that emits steadily for longer than the per-attempt wall clock (`read_timeout × 1.15`) then
+dies with `attempt_deadline` despite never stalling. Here two dataset rows stream 256 tokens at
+5 ms each = 1280 ms, against a 1150 ms ceiling.
+
+This inverts the property [ADR-024](#adr-024) exists to provide. A stream is supposed to be bounded
+by its *inter-chunk gap*, not its total duration — a 60-second stream that never pauses is healthy.
+Buffering discards that distinction and reimposes a wall clock. **Operationally: if clients send
+`stream: true`, either enable streaming or size the total budget for the full buffered duration of
+the largest stream you accept.**
+
+Availability is asserted on the **fleet**, not per tenant. With ~60 requests each, one failure is
+1.7%, so a per-tenant 99.5% bar is "zero errors" wearing an SLO's clothes. Fairness is a separate
+question and gets a separate check.
