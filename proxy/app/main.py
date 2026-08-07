@@ -18,6 +18,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 
 from app import api
+from app.breaker import Breaker
 from app.config import settings
 from app.logging_setup import configure, logx
 from app.middleware.client_identity import ClientIdentityMiddleware
@@ -68,6 +69,24 @@ async def lifespan(app: Starlette):
         # the transport and is silently discarded.
         client.assert_pool_limits()
 
+    # One breaker instance serves regions AND Redis. In literal mode (the
+    # default) it is not created at all, so every request walks the priority
+    # list and really enters the except block. (ADR-009)
+    breaker = None
+    if settings.resilient:
+
+        async def _purge(region_id: str) -> None:
+            client = clients.get(region_id)
+            if client is not None:
+                await client.purge_pool()
+
+        breaker = Breaker(
+            failure_threshold=settings.breaker.failure_threshold,
+            cooldown_s=settings.breaker.cooldown_s,
+            max_cooldown_s=settings.breaker.max_cooldown_s,
+            on_open=_purge,
+        )
+
     redis = build_redis(settings.redis_url) if settings.redis_url else None
     limiter = TokenBucketLimiter(
         redis,
@@ -75,7 +94,7 @@ async def lifespan(app: Starlette):
         refill_per_sec=settings.rl_refill_per_sec,
         ttl_pad_ms=settings.rl_ttl_pad_ms,
         fail_mode=settings.rl_fail_mode,
-        breaker=None,
+        breaker=breaker,
     )
 
     app.state.settings = settings
@@ -85,7 +104,7 @@ async def lifespan(app: Starlette):
     app.state.limiter = limiter
     app.state.admission = asyncio.Semaphore(settings.max_inflight)
     app.state.primary_region = registry.ordered()[0].id
-    app.state.router = ResilientRouter(registry, clients, settings, breaker=None)
+    app.state.router = ResilientRouter(registry, clients, settings, breaker=breaker)
 
     logx(
         "ready",
@@ -93,6 +112,7 @@ async def lifespan(app: Starlette):
         primary=app.state.primary_region,
         rate_limit=f"{settings.rl_capacity} @ {settings.rl_refill_per_sec}/s",
         redis=bool(redis),
+        breaker=settings.resilient,
     )
     try:
         yield
@@ -112,6 +132,7 @@ def create_app() -> Starlette:
             Route("/healthz", api.healthz, methods=["GET"]),
             Route("/readyz", api.readyz, methods=["GET"]),
             Route("/admin/regions", api.admin_regions, methods=["GET"]),
+            Route("/metrics", api.metrics_endpoint, methods=["GET"]),
             Route("/admin/ratelimit", api.admin_ratelimit, methods=["GET", "DELETE"]),
             Route("/debug/whoami", api.whoami, methods=["GET"]),
         ],

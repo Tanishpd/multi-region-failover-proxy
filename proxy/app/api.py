@@ -8,6 +8,7 @@ import logging
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
+from app import metrics
 from app.logging_setup import logx
 from app.schemas import ProxyRequest, ProxyResult, problem
 
@@ -93,6 +94,23 @@ async def admin_regions(request: Request) -> JSONResponse:
             ],
         }
     )
+
+
+async def metrics_endpoint(request: Request) -> Response:
+    """Prometheus exposition. Gauges are refreshed here rather than on a timer.
+
+    A gauge written only on state change goes stale whenever nothing happens,
+    which is exactly the situation during an outage nobody is driving traffic
+    through. Recomputing at scrape time keeps it honest.
+    """
+    router = request.app.state.router
+    for region_id, health in router.health.items():
+        metrics.observe_health(region_id, health.ok)
+    if router.breaker is not None:
+        for region_id in router.health:
+            metrics.observe_breaker(region_id, router.breaker.state_name(region_id))
+
+    return Response(content=metrics.render(), media_type=metrics.CONTENT_TYPE)
 
 
 async def admin_ratelimit(request: Request) -> JSONResponse:

@@ -10,6 +10,7 @@ from pathlib import Path
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
+from app import metrics
 from app.logging_setup import logx
 from app.ratelimit.local_fallback import LocalBucket
 from app.ratelimit.scripts import LuaScript
@@ -59,6 +60,7 @@ class TokenBucketLimiter:
         self.breaker = breaker
         self.script = LuaScript.from_file(redis, LUA_PATH) if redis else None
         self.local = LocalBucket(capacity=capacity, refill_per_sec=refill_per_sec)
+        self._recoveries_seen = 0
 
     @staticmethod
     def bucket_key(identity: str, layer: str = "burst") -> str:
@@ -83,7 +85,16 @@ class TokenBucketLimiter:
                 )
                 if self.breaker is not None:
                     self.breaker.record_success("redis")
-                return self._decode(reply, key)
+                decision = self._decode(reply, key)
+                metrics.RATE_LIMIT_DECISIONS.labels("redis").inc()
+                # A Counter is incremented, never assigned; mirror the script's
+                # running total by advancing it by whatever it has not seen yet.
+                if self.script.noscript_recoveries > self._recoveries_seen:
+                    metrics.NOSCRIPT_RECOVERIES.inc(
+                        self.script.noscript_recoveries - self._recoveries_seen
+                    )
+                    self._recoveries_seen = self.script.noscript_recoveries
+                return decision
             except (RedisError, TimeoutError, OSError) as exc:
                 if self.breaker is not None:
                     self.breaker.record_failure("redis", code=type(exc).__name__)
@@ -123,6 +134,7 @@ class TokenBucketLimiter:
                 bucket_key=key,
             )
 
+        metrics.RATE_LIMIT_DECISIONS.labels("local").inc()
         allowed, remaining, retry_ms = self.local.consume(identity, cost)
         return Decision(
             allowed=allowed,

@@ -217,15 +217,57 @@ async def total_blackout(cfg: FloodConfig, docker: DockerControl) -> ScenarioRes
     )
 
 
+async def recover_us_east(cfg: FloodConfig, docker: DockerControl) -> ScenarioResult:
+    """Stop the primary long enough for the breaker to open, then bring it back.
+
+    Only meaningful in resilient mode: the point is watching circuit_opened ->
+    circuit_half_open -> circuit_closed, and confirming the single-flight probe
+    lets traffic return without stampeding a region that is still starting.
+    """
+    container = CONTAINERS["us-east-1"]
+    fault_ms = 0.0
+
+    async def fault() -> float:
+        nonlocal fault_ms
+        action = await docker.stop(container)
+        fault_ms = action.duration_ms
+        return fault_ms
+
+    async def repair() -> None:
+        await docker.start(container)
+        # Long enough for the breaker's cooldown to elapse and a probe to run.
+        await asyncio.sleep(8.0)
+
+    records, events, windows, t0, _ = await _flood_with_fault(
+        cfg, settle_s=4.0, fault=fault, outage_s=8.0, repair=repair
+    )
+    return ScenarioResult(
+        name="recover-us-east",
+        records=records,
+        assertions=[],
+        events=events,
+        windows=windows,
+        docker_actions=docker.as_dict(),
+        t0=t0,
+        notes={"fault_duration_ms": fault_ms, "primary": "us-east-1", "failover_to": "eu-west-1"},
+    )
+
+
 SCENARIOS: dict[str, Callable] = {
     "stop-us-east": stop_us_east,
     "pause-us-east": pause_us_east,
     "cascade-two": cascade_two,
     "total-blackout": total_blackout,
+    "recover-us-east": recover_us_east,
 }
 
 
-def assert_scenario(result: ScenarioResult, failover_log_lines: list[dict], rps: int) -> None:
+def assert_scenario(
+    result: ScenarioResult,
+    failover_log_lines: list[dict],
+    rps: int,
+    mode: str = "literal",
+) -> None:
     """Attach the right assertion set for the scenario in place."""
     notes = result.notes
     if result.name == "total-blackout":
@@ -248,6 +290,7 @@ def assert_scenario(result: ScenarioResult, failover_log_lines: list[dict], rps:
         failover_log_lines=failover_log_lines,
         target_rps=rps,
         error_budget=error_budget,
+        mode=mode,
     )
 
 

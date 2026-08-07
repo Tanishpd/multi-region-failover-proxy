@@ -34,6 +34,18 @@ def _c(code: str, text: str) -> str:
     return f"\033[{code}m{text}\033[0m" if sys.stdout.isatty() else text
 
 
+async def proxy_mode() -> str:
+    """Ask the proxy which mode it is in, rather than guessing from env."""
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.get("http://127.0.0.1:8000/admin/regions")
+        return resp.json().get("mode", "literal")
+    except Exception:
+        return "literal"
+
+
 async def preflight(cfg: FloodConfig) -> None:
     """Fail fast and legibly rather than producing a meaningless run.
 
@@ -188,7 +200,10 @@ async def main_async(args: argparse.Namespace) -> int:
         await docker.restore()
 
     logs = await proxy_logs.capture(PROXY_CONTAINER, since)
-    assert_scenario(result, proxy_logs.failover_lines(logs), args.rps)
+    # The proxy reports its own mode; A13's meaning inverts between the two.
+    mode = await proxy_mode()
+    result.notes["mode"] = mode
+    assert_scenario(result, proxy_logs.failover_lines(logs), args.rps, mode)
 
     run_id = time.strftime("%Y%m%d-%H%M%S") + f"-{result.name}"
     run_dir = ARTIFACTS / run_id

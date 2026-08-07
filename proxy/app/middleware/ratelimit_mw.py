@@ -15,6 +15,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from app import metrics
 from app.logging_setup import logx
 from app.ratelimit.headers import headers_for, rejection_body
 
@@ -68,6 +69,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 mode=decision.mode,
                 retry_after_s=decision.retry_after_s,
             )
+            metrics.RATE_LIMIT_REJECTED.inc()
             request_id = getattr(request.state, "request_id", "-")
             return JSONResponse(
                 status_code=429,

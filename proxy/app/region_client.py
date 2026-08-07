@@ -16,6 +16,8 @@ refactor cannot re-break this quietly.
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 
 from app.regions import RegionSpec
@@ -87,6 +89,22 @@ class RegionClient:
                 else httpx.USE_CLIENT_DEFAULT
             ),
         )
+
+    async def purge_pool(self, drain_after_s: float = 0.25) -> None:
+        """Swap in a fresh client, then close the old one once attempts drain.
+
+        Called when the breaker opens. Stale keep-alive sockets to a container
+        that restarted are precisely what turn a dead upstream into
+        RemoteProtocolError rather than a clean connect failure.
+
+        The swap happens FIRST so new requests immediately get fresh
+        connections; the old client is closed after a short delay so attempts
+        already in flight finish rather than being aborted mid-response.
+        """
+        old = self._client
+        self._client = self._build()
+        await asyncio.sleep(drain_after_s)
+        await old.aclose()
 
     async def aclose(self) -> None:
         await self._client.aclose()

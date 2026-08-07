@@ -35,6 +35,7 @@ from dataclasses import dataclass
 
 import httpx
 
+from app import metrics
 from app.config import Settings
 from app.failures import FailureClass, UpstreamStatusError, classify, is_replayable
 from app.logging_setup import logx
@@ -147,8 +148,12 @@ class ResilientRouter:
                 # 4xx: the region is alive, the caller is at fault. Pass it
                 # through and record a SUCCESS for the region.
                 self._record_success(spec.id)
-                attempts.append(Attempt(spec.id, "ok", _ms_since(t0)))
+                elapsed_ok = _ms_since(t0)
+                attempts.append(Attempt(spec.id, "ok", elapsed_ok))
+                metrics.UPSTREAM_LATENCY.labels(spec.id, "ok").observe(elapsed_ok / 1000)
                 result = ProxyResult.ok(resp, spec.id, attempts, _ms_since(t_start))
+                metrics.REQUESTS.labels(spec.id, str(resp.status_code)).inc()
+                metrics.REQUEST_LATENCY.observe(result.total_ms / 1000)
                 logx(
                     "request",
                     region=spec.id,
@@ -170,6 +175,8 @@ class ResilientRouter:
 
             self._record_failure(spec.id, code)
             elapsed = _ms_since(t0)
+            metrics.ATTEMPT_FAILED.labels(spec.id, code).inc()
+            metrics.UPSTREAM_LATENCY.labels(spec.id, code).observe(elapsed / 1000)
             attempts.append(Attempt(spec.id, code, elapsed, fclass=fclass))
             logx(
                 "upstream_attempt_failed",
@@ -197,8 +204,12 @@ class ResilientRouter:
                     elapsed_ms=round(elapsed, 2),
                     request_id=req.request_id,
                 )
+                metrics.FAILOVER.labels(spec.id, nxt.id, code).inc()
 
         result = ProxyResult.all_failed(attempts, _ms_since(t_start))
+        metrics.ALL_DOWN.inc()
+        metrics.REQUESTS.labels("none", "503").inc()
+        metrics.REQUEST_LATENCY.observe(result.total_ms / 1000)
         logx(
             "all_regions_down",
             level=logging.ERROR,
@@ -210,10 +221,12 @@ class ResilientRouter:
 
     def _record_success(self, region_id: str) -> None:
         self.health[region_id] = RegionHealth(ok=True, code="ok", at=time.time())
+        metrics.observe_health(region_id, True)
         if self.breaker is not None:
             self.breaker.record_success(region_id)  # type: ignore[attr-defined]
 
     def _record_failure(self, region_id: str, code: str) -> None:
         self.health[region_id] = RegionHealth(ok=False, code=code, at=time.time())
+        metrics.observe_health(region_id, False)
         if self.breaker is not None:
             self.breaker.record_failure(region_id, code=code)  # type: ignore[attr-defined]

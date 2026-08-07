@@ -104,7 +104,7 @@ report:
 	@bash ops/scripts/_todo.sh 8 "make report"
 
 bench:
-	@bash ops/scripts/_todo.sh 5 "make bench"
+	@bash ops/scripts/bench.sh
 
 # --- housekeeping -----------------------------------------------------------
 

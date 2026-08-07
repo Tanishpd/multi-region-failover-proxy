@@ -17,6 +17,7 @@ pydantic==2.10.6
 pydantic-settings==2.7.1
 PyYAML==6.0.2
 redis==5.2.1
+prometheus-client==0.21.1
 
 # --- host-only tooling ------------------------------------------------------
 pytest==8.3.4
