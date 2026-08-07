@@ -24,13 +24,29 @@ bash "$ROOT/ops/scripts/venv.sh"
 current="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' mrfp-proxy 2>/dev/null \
            | grep '^MRFP_CHAOS_MODE=' || true)"
 
+# A one-off token for this run only. Never a committed default: the bypass
+# skips rate limiting completely, and an earlier version left the proxy armed
+# with a literal from the public repo for the life of the container.
+CHAOS_TOKEN="chaos-$(head -c 18 /dev/urandom | base64 | tr -d '/+=')"
+export MRFP_CHAOS_TOKEN="$CHAOS_TOKEN"
+
+restore() {
+  printf '\nchaos: disarming the rate-limit bypass\n'
+  MRFP_CHAOS_MODE=0 MRFP_CHAOS_TOKEN= dc up -d --force-recreate --wait --wait-timeout 60 \
+    mrfp-proxy >/dev/null 2>&1 || true
+}
+
 if [[ "$current" != "MRFP_CHAOS_MODE=1" ]]; then
-  printf 'chaos: enabling the rate-limit bypass on mrfp-proxy (was %s)\n' "${current:-unset}"
+  printf 'chaos: arming the rate-limit bypass for this run only\n'
   MRFP_CHAOS_MODE=1 dc up -d --force-recreate --wait --wait-timeout 60 mrfp-proxy >/dev/null
-  # Give the fresh proxy a moment to warm its connection pools, so the first
-  # seconds of the baseline window are not measuring cold starts.
+  # Disarm on ANY exit, including a failed run or Ctrl-C. The proxy must not be
+  # left in a state where one header defeats the limiter.
+  trap restore EXIT INT TERM
+  # Let the fresh proxy warm its connection pools, so the baseline window is not
+  # measuring cold starts.
   sleep 2
 fi
 
 cd "$ROOT"
-exec "$ROOT/.venv/bin/python" -m chaos.run --scenario "$SCENARIO" "${@:2}"
+# Not exec: the EXIT trap has to run after the harness finishes.
+"$ROOT/.venv/bin/python" -m chaos.run --scenario "$SCENARIO" "${@:2}"

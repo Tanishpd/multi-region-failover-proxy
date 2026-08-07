@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
+import secrets
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -32,9 +34,19 @@ async def infer(request: Request) -> Response:
 
     async with state.admission:
         try:
-            req = await ProxyRequest.from_starlette(request, max_body=state.settings.max_body_bytes)
+            req = await ProxyRequest.from_starlette(
+                request,
+                max_body=state.settings.max_body_bytes,
+                read_timeout_s=state.settings.body_read_timeout_s,
+            )
         except ValueError as e:
-            return problem(413, "body-too-large", "Request body too large", str(e))
+            # Covers three cases, all client-caused: Content-Length over the
+            # cap, a body that outgrew it mid-stream, and a read that stalled.
+            detail = str(e)
+            status = 408 if "not received within" in detail else 413
+            title = "Request timeout" if status == 408 else "Request body too large"
+            logx("request_rejected", level=logging.WARNING, status=status, detail=detail)
+            return problem(status, "body-rejected", title, detail)
 
         result: ProxyResult = await state.router.route(req)
         return result.to_response(primary_region=state.primary_region)
@@ -72,7 +84,11 @@ async def readyz(request: Request) -> JSONResponse:
     )
 
 
-async def admin_regions(request: Request) -> JSONResponse:
+async def admin_regions(request: Request) -> Response:
+    denied = _admin_denied(request)
+    if denied is not None:
+        return denied
+
     state = request.app.state
     breaker = state.router.breaker
     health = state.router.health
@@ -96,6 +112,60 @@ async def admin_regions(request: Request) -> JSONResponse:
     )
 
 
+def _admin_denied(request: Request) -> Response | None:
+    """Guard for /admin/* and /debug/*. Returns a response to send, or None.
+
+    Two states, no third:
+      * MRFP_ADMIN_TOKEN unset  -> the routes are DISABLED (404). A control
+        plane that can reset any client's rate-limit bucket must not be open
+        merely because nobody configured it.
+      * set -> require `Authorization: Bearer <token>`, compared in constant
+        time so the comparison itself is not an oracle.
+
+    Previously these routes were entirely unauthenticated, and the rate limiter
+    exempts /admin/* — so `DELETE /admin/ratelimit?id=<self>` between batches
+    took a measured 20/40 up to 100/100 through a 20/s limit.
+    """
+    token = request.app.state.settings.admin_token
+    if not token:
+        return problem(
+            404,
+            "not-found",
+            "Not found",
+            "The control plane is disabled. Set MRFP_ADMIN_TOKEN to enable it.",
+        )
+
+    presented = request.headers.get("authorization", "")
+    scheme, _, value = presented.partition(" ")
+    if scheme.lower() != "bearer" or not secrets.compare_digest(value, token):
+        logx(
+            "admin_denied",
+            level=logging.WARNING,
+            path=request.url.path,
+            peer=getattr(request.state, "peer", "-"),
+        )
+        return problem(
+            401,
+            "unauthorized",
+            "Unauthorized",
+            "This endpoint requires Authorization: Bearer <MRFP_ADMIN_TOKEN>.",
+        )
+    return None
+
+
+def _valid_identity(raw: str) -> bool:
+    """Bucket identities are IPs. Anything else is someone probing.
+
+    `?id=` was unvalidated, so an attacker could allocate an unbounded number of
+    distinct keys in the in-process fallback bucket, which has no eviction.
+    """
+    try:
+        ipaddress.ip_address(raw)
+    except ValueError:
+        return False
+    return True
+
+
 async def metrics_endpoint(request: Request) -> Response:
     """Prometheus exposition. Gauges are refreshed here rather than on a timer.
 
@@ -103,6 +173,13 @@ async def metrics_endpoint(request: Request) -> Response:
     which is exactly the situation during an outage nobody is driving traffic
     through. Recomputing at scrape time keeps it honest.
     """
+    # Scrapers frequently cannot present a bearer token, and this route mutates
+    # nothing — so it has its own switch rather than sharing the admin guard.
+    if not request.app.state.settings.metrics_public:
+        denied = _admin_denied(request)
+        if denied is not None:
+            return denied
+
     router = request.app.state.router
     for region_id, health in router.health.items():
         metrics.observe_health(region_id, health.ok)
@@ -119,11 +196,20 @@ async def admin_ratelimit(request: Request) -> JSONResponse:
     `peek` matters: inspecting a bucket must not change it, or the act of
     debugging a rate limit becomes part of the rate limit.
     """
+    denied = _admin_denied(request)
+    if denied is not None:
+        return denied
+
     state = request.app.state
     identity = request.query_params.get("id") or getattr(request.state, "client_ip", "unknown")
+    if not _valid_identity(identity):
+        return problem(
+            400, "bad-identity", "Bad identity", f"{identity!r} is not a valid IP address."
+        )
 
     if request.method == "DELETE":
         cleared = await state.limiter.reset(identity)
+        logx("admin_ratelimit_reset", level=logging.WARNING, identity=identity)
         return JSONResponse({"identity": identity, "cleared": cleared})
 
     decision = await state.limiter.peek(identity)
@@ -139,15 +225,23 @@ async def admin_ratelimit(request: Request) -> JSONResponse:
     )
 
 
-async def whoami(request: Request) -> JSONResponse:
+async def whoami(request: Request) -> Response:
     """What the proxy thinks you are — the first stop when every client shares
-    one rate-limit bucket."""
+    one rate-limit bucket.
+
+    Behind the admin guard, and no longer echoes `trusted_proxies`: telling an
+    anonymous caller which source ranges are believed hands them the recipe for
+    spoofing an identity.
+    """
+    denied = _admin_denied(request)
+    if denied is not None:
+        return denied
+
     return JSONResponse(
         {
             "peer": getattr(request.state, "peer", "-"),
             "resolved_client_ip": getattr(request.state, "client_ip", "-"),
             "x_forwarded_for": request.headers.get("x-forwarded-for"),
-            "trusted_proxies": request.app.state.settings.trusted_proxies,
             "note": (
                 "resolved_client_ip is the rate-limit bucket identity. If this is a "
                 "docker bridge address, every host client shares one bucket."

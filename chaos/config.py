@@ -52,7 +52,10 @@ class FloodConfig:
     # never be mistaken for a proxy failure.
     client_timeout_s: float = 5.0
     payload: dict = field(default_factory=lambda: {"prompt": "chaos", "max_tokens": 8})
-    bypass_token: str = os.getenv("MRFP_CHAOS_TOKEN", "dev-chaos-bypass")
+    # No default: ops/scripts/chaos.sh mints a fresh token per run and exports
+    # it. A committed literal here would be a permanent rate-limit bypass in a
+    # public repo.
+    bypass_token: str = os.getenv("MRFP_CHAOS_TOKEN", "")
 
 
 @dataclass(slots=True)

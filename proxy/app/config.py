@@ -30,10 +30,17 @@ class Settings(BaseSettings):
     # for the project brief. (ADR-009)
     mode: str = "literal"
 
-    # No default, deliberately. An unset value must raise at boot rather than
-    # silently connecting to the developer's native Redis on host 6379.
-    # (ADR-004) — Phase 4 consumes this; Phase 2 only records it.
+    # No usable default. An unset value must fail loudly rather than silently
+    # connecting to the developer's native Redis on host 6379 (ADR-004) — or,
+    # as it did before `require_redis` existed, silently disabling distributed
+    # rate limiting and falling back to a per-process bucket, so that N replicas
+    # enforce N times the configured limit and nothing says so.
     redis_url: str = Field(default="")
+
+    # Set false only for a deliberately Redis-less run (unit tests, a local
+    # smoke test). In any real deployment an unset MRFP_REDIS_URL is a
+    # misconfiguration, not a mode.
+    require_redis: bool = True
 
     regions_file: str = "/config/regions.yaml"
     region_priority: str = ""
@@ -55,6 +62,19 @@ class Settings(BaseSettings):
     max_inflight: int = 128
     max_body_bytes: int = 262_144
 
+    # An admission slot is held while the body is read, so an unbounded read is
+    # a slot held forever. This bounds it.
+    body_read_timeout_s: float = 5.0
+
+    # Guards /admin/* and /debug/*. Empty means those routes are DISABLED —
+    # never "open". A control plane that mutates rate-limit state must not be
+    # reachable just because someone forgot to set a variable.
+    admin_token: str = ""
+
+    # /metrics is separated from the rest of the control plane because scrapers
+    # commonly cannot send a bearer token, and it exposes no mutating action.
+    metrics_public: bool = True
+
     trusted_proxies: str = "127.0.0.1/32,::1/128"
 
     # Token bucket. capacity is the largest burst allowed; refill_per_sec is the
@@ -73,6 +93,53 @@ class Settings(BaseSettings):
     @property
     def resilient(self) -> bool:
         return self.mode == "resilient"
+
+    def validate_for_boot(self) -> list[str]:
+        """Configuration errors that must stop the process, not degrade it.
+
+        pydantic-settings silently ignores an unrecognised variable, so a typo
+        leaves a default in place with no error. These checks turn the
+        misconfigurations that matter into a refusal to start.
+        """
+        problems: list[str] = []
+
+        if self.mode not in {"literal", "resilient"}:
+            problems.append(f"MRFP_MODE={self.mode!r} is not 'literal' or 'resilient'")
+
+        if self.rl_fail_mode not in {"open", "closed"}:
+            problems.append(f"MRFP_RL_FAIL_MODE={self.rl_fail_mode!r} is not 'open' or 'closed'")
+
+        if self.require_redis and not self.redis_url:
+            problems.append(
+                "MRFP_REDIS_URL is unset. Without it the token bucket is per-process, so N "
+                "replicas enforce N times the configured limit. Set it, or set "
+                "MRFP_REQUIRE_REDIS=0 to run deliberately without Redis."
+            )
+
+        # The budget must fit the walk it is meant to bound, or the last region
+        # is silently never tried and failover looks broken for no visible reason.
+        per_attempt = self.connect_timeout_ms + self.read_timeout_ms
+        needed = per_attempt * 3
+        if self.total_budget_ms < needed:
+            problems.append(
+                f"MRFP_TOTAL_BUDGET_MS={self.total_budget_ms} is below "
+                f"3 x (connect {self.connect_timeout_ms} + read {self.read_timeout_ms}) "
+                f"= {needed}ms, so the third region can never be attempted"
+            )
+
+        if self.chaos_mode and not self.chaos_token:
+            problems.append(
+                "MRFP_CHAOS_MODE=1 requires an explicit MRFP_CHAOS_TOKEN. The bypass header "
+                "skips rate limiting entirely and must never be armed with a default."
+            )
+
+        if self.rl_capacity < 1 or self.rl_refill_per_sec <= 0:
+            problems.append(
+                f"rate limit must be positive: capacity={self.rl_capacity}, "
+                f"refill={self.rl_refill_per_sec}"
+            )
+
+        return problems
 
     def priority_override(self) -> list[str]:
         return [r.strip() for r in self.region_priority.split(",") if r.strip()]

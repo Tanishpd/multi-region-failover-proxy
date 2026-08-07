@@ -179,7 +179,9 @@ def check_stop_scenario(
         if line.get("from_region") == primary and line.get("error_class")
     ]
     classes = sorted({line["error_class"] for line in good_lines})
-    hops = sorted({f"{line['from_region']}->{line.get('to_region')}" for line in failover_log_lines})
+    hops = sorted(
+        {f"{line['from_region']}->{line.get('to_region')}" for line in failover_log_lines}
+    )
     out.append(
         Assertion(
             "A8",

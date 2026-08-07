@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from starlette.applications import Starlette
 from starlette.routing import Route
@@ -49,6 +49,22 @@ async def lifespan(app: Starlette):
         regions_file=settings.regions_file,
         breaker_enabled=settings.resilient,
     )
+
+    # Refuse to start on a misconfiguration rather than degrading into one.
+    # pydantic-settings ignores unknown variables silently, so a typo would
+    # otherwise leave a default in place with no signal at all.
+    problems = settings.validate_for_boot()
+    if problems:
+        for problem_text in problems:
+            logx("config_invalid", level=logging.ERROR, problem=problem_text)
+        raise RuntimeError("invalid configuration:\n  - " + "\n  - ".join(problems))
+
+    if not settings.admin_token:
+        logx(
+            "admin_disabled",
+            level=logging.WARNING,
+            detail="MRFP_ADMIN_TOKEN unset; /admin and /debug return 404",
+        )
 
     registry = RegionRegistry.load(settings.regions_file, settings.priority_override())
 
@@ -106,6 +122,11 @@ async def lifespan(app: Starlette):
     app.state.primary_region = registry.ordered()[0].id
     app.state.router = ResilientRouter(registry, clients, settings, breaker=breaker)
 
+    # The in-process fallback bucket has no TTL (Redis does), so without this
+    # it grows one entry per distinct identity, forever — a slow memory leak
+    # keyed by client IP.
+    sweeper = asyncio.create_task(_sweep_local_buckets(limiter))
+
     logx(
         "ready",
         regions=[s.id for s in registry.ordered()],
@@ -113,15 +134,32 @@ async def lifespan(app: Starlette):
         rate_limit=f"{settings.rl_capacity} @ {settings.rl_refill_per_sec}/s",
         redis=bool(redis),
         breaker=settings.resilient,
+        admin=bool(settings.admin_token),
+        chaos_bypass=bool(settings.chaos_mode),
     )
     try:
         yield
     finally:
+        sweeper.cancel()
+        with suppress(asyncio.CancelledError):
+            await sweeper
         for client in clients.values():
             await client.aclose()
         if redis is not None:
             await redis.aclose()
         logx("shutdown")
+
+
+async def _sweep_local_buckets(limiter, interval_s: float = 60.0) -> None:
+    """Evict idle fallback buckets. `evict_older_than` existed but was dead code."""
+    # Anything idle for longer than this has fully refilled, so dropping it is
+    # indistinguishable from keeping it — except in memory.
+    max_idle_ms = 300_000
+    while True:
+        await asyncio.sleep(interval_s)
+        dropped = limiter.local.evict_older_than(max_idle_ms)
+        if dropped:
+            logx("local_buckets_evicted", count=dropped, remaining=len(limiter.local._buckets))
 
 
 def create_app() -> Starlette:

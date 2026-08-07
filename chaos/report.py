@@ -155,7 +155,11 @@ def summary_block(runs: dict[str, dict], scenario: str) -> str:
     if run is None:
         return "\n_not run_\n"
 
-    rows = ["", "| Window | Requests | Success | Errors | p50 | p99 | Regions serving |", "|---|---|---|---|---|---|---|"]
+    rows = [
+        "",
+        "| Window | Requests | Success | Errors | p50 | p99 | Regions serving |",
+        "|---|---|---|---|---|---|---|",
+    ]
     for window in ("baseline", "outage", "recovery"):
         w = run["by_window"][window]
         regions = ", ".join(f"{k} ×{v}" for k, v in w["by_region"].items() if k != "-") or "—"
@@ -210,7 +214,10 @@ def stop_vs_pause_block(runs: dict[str, dict]) -> str:
             row("Exception class", codes),
             row("Detection p50", lambda r: f"**{r['detection']['p50_ms']} ms**"),
             row("Detection p99", lambda r: f"{r['detection']['p99_ms']} ms"),
-            row("Detection min / max", lambda r: f"{r['detection']['min_ms']} / {r['detection']['max_ms']} ms"),
+            row(
+                "Detection min / max",
+                lambda r: f"{r['detection']['min_ms']} / {r['detection']['max_ms']} ms",
+            ),
             row("Outage-window p50", lambda r: f"{r['by_window']['outage']['p50_ms']} ms"),
             row(
                 "Read timeout exercised?",
@@ -280,7 +287,9 @@ def main() -> int:
     text = INLINE.sub(replace_inline, text)
     REPORT.write_text(text)
 
-    print(f"report: filled {len(filled)} region(s) from {len(runs)} run(s): {', '.join(sorted(runs))}")
+    print(
+        f"report: filled {len(filled)} region(s) from {len(runs)} run(s): {', '.join(sorted(runs))}"
+    )
     return 0
 
 

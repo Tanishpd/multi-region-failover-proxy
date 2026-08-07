@@ -5,6 +5,7 @@ docs/CONTRACT.md sections 3 and 4 own every name here.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 
 import httpx
@@ -33,6 +34,30 @@ _HOP_BY_HOP = frozenset(
 )
 
 
+# Response headers the proxy must NOT copy from an upstream.
+#
+# Hop-by-hop for the same reason as the request side, plus:
+#   content-length / content-type  Starlette recomputes these from the body we
+#                                  actually send; copying them can contradict it.
+#   content-encoding               we hand the body through verbatim, so the
+#                                  encoding header must travel with it — but
+#                                  only via the explicit allowance below, never
+#                                  alongside a recomputed content-length.
+_RESPONSE_DROP = _HOP_BY_HOP | {"content-length", "content-type", "server", "date"}
+
+
+def passthrough_response_headers(headers) -> dict[str, str]:
+    """Forward the upstream's response headers to the client.
+
+    Previously nothing did this: `ProxyResult.upstream_headers` was declared and
+    never written, so every upstream header except Content-Type was silently
+    dropped. For a real API that loses Cache-Control, ETag, Set-Cookie, the
+    upstream's own RateLimit-* headers, and any request-id echo — which makes
+    this a forwarder rather than a proxy.
+    """
+    return {k: v for k, v in headers.items() if k.lower() not in _RESPONSE_DROP}
+
+
 @dataclass(slots=True)
 class Attempt:
     region: str
@@ -56,18 +81,56 @@ class ProxyRequest:
     idempotent: bool = True
 
     @classmethod
-    async def from_starlette(cls, request: Request, *, max_body: int) -> ProxyRequest:
-        """Read the body ONCE, into memory.
+    async def from_starlette(
+        cls, request: Request, *, max_body: int, read_timeout_s: float = 5.0
+    ) -> ProxyRequest:
+        """Read the body ONCE, into memory, under a size cap AND a deadline.
 
         A streamed body is consumed by the first attempt and cannot be replayed
-        to a second region — and replay is the entire feature. The cap plus the
-        admission semaphore is what stops buffered bodies from being an
-        unbounded memory commitment. (ADR-006)
-        """
-        body = await request.body()
-        if len(body) > max_body:
-            raise ValueError(f"body of {len(body)} bytes exceeds the {max_body} byte cap")
+        to a second region — and replay is the entire feature. (ADR-006)
 
+        This used to be `await request.body()` with the cap checked afterwards,
+        which meant the cap did not exist: Starlette buffers every chunk and
+        joins them with no limit, so the check only ever ran on a body already
+        in memory. A single 512 MiB POST OOM-killed the container (peak is ~2x
+        the body, because the chunk list and the joined bytes coexist during the
+        join), and `restart: "no"` meant it stayed dead.
+
+        Three bounds now, in increasing cost order:
+          1. Content-Length, when present — rejects before a byte is read.
+          2. A running total across `request.stream()` — aborts mid-upload for
+             chunked bodies that declare no length, or that lie about it.
+          3. A wall-clock deadline — an admission slot is held across this read,
+             so an unbounded read is a slot held forever. 130 sockets trickling
+             ~130 bytes/sec previously wedged the whole data plane while
+             /healthz still reported 200.
+        """
+        declared = request.headers.get("content-length")
+        if declared is not None:
+            try:
+                if int(declared) > max_body:
+                    raise ValueError(f"Content-Length {declared} exceeds the {max_body} byte cap")
+            except ValueError as exc:
+                if "exceeds" in str(exc):
+                    raise
+                raise ValueError(f"malformed Content-Length: {declared!r}") from exc
+
+        chunks: list[bytes] = []
+        total = 0
+        try:
+            async with asyncio.timeout(read_timeout_s):
+                async for chunk in request.stream():
+                    total += len(chunk)
+                    if total > max_body:
+                        # Stop reading. Do not accumulate the rest.
+                        raise ValueError(f"body exceeds the {max_body} byte cap")
+                    chunks.append(chunk)
+        except TimeoutError as exc:
+            raise ValueError(
+                f"body not received within {read_timeout_s:.1f}s (slow or stalled upload)"
+            ) from exc
+
+        body = b"".join(chunks)
         headers = {k: v for k, v in request.headers.items() if k.lower() not in _HOP_BY_HOP}
         return cls(
             method=request.method,
@@ -107,6 +170,7 @@ class ProxyResult:
             region=region,
             attempts=attempts,
             total_ms=total_ms,
+            upstream_headers=passthrough_response_headers(resp.headers),
         )
 
     @classmethod
@@ -144,7 +208,10 @@ class ProxyResult:
         }
 
     def to_response(self, *, primary_region: str) -> Response:
-        headers = self.headers(primary_region=primary_region)
+        # Upstream headers FIRST, so the proxy's own X-* always win a collision
+        # and a region cannot forge its own X-Served-By-Region.
+        headers = dict(self.upstream_headers)
+        headers.update(self.headers(primary_region=primary_region))
         if self.status == 503:
             headers["Retry-After"] = "1"
         return Response(

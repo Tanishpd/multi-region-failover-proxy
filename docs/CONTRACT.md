@@ -42,7 +42,7 @@ forbidden.
 | Variable | Default | Notes |
 |---|---|---|
 | `MRFP_MODE` | `literal` | `literal` \| `resilient`. **[BRIEF]** `literal` is the default and disables the circuit breaker, so every request during an outage walks the priority list and hits the `try/except`. See §9. |
-| `MRFP_REDIS_URL` | **none — required** | Deliberately has no default. Unset raises at boot rather than silently connecting to the host's own Redis on 6379. |
+| `MRFP_REDIS_URL` | **none — required** | No default. Unset now genuinely refuses to boot ([ADR-020](DECISIONS.md#adr-020)); before that the comment claimed it did while the service quietly fell back to a per-process bucket. |
 | `MRFP_REGIONS_FILE` | `/config/regions.yaml` | Absolute, resolved from env — never `Path(__file__).parents[N]`, which breaks in-container. |
 | `MRFP_REGION_PRIORITY` | unset | Comma-separated override of the YAML order. The *only* way to reorder regions. |
 | `MRFP_READ_TIMEOUT_MS` | `200` | **[BRIEF]** the brief's number. |
@@ -50,8 +50,8 @@ forbidden.
 | `MRFP_POOL_TIMEOUT_MS` | `50` | |
 | `MRFP_TOTAL_BUDGET_MS` | `900` | Ceiling across all failover attempts. |
 | `MRFP_MAX_INFLIGHT` | `128` | Admission semaphore. |
-| `MRFP_MAX_BODY_BYTES` | `262144` | 256 KiB → 413 above it. Bodies are buffered so they can be replayed to a second region. |
-| `MRFP_TRUSTED_PROXIES` | `127.0.0.1/32,::1/128` | See §7. Never widen to all of RFC1918. |
+| `MRFP_MAX_BODY_BYTES` | `262144` | 256 KiB → 413 above it, enforced BEFORE buffering ([ADR-019](DECISIONS.md#adr-019)). Bodies are buffered so they can be replayed to a second region. |
+| `MRFP_TRUSTED_PROXIES` | `127.0.0.1/32,::1/128` | See §7. Never widen to RFC1918 — compose once did, and it made the rate limiter fully bypassable ([ADR-018](DECISIONS.md#adr-018)). |
 | `MRFP_RL_CAPACITY` | `20` | **[BRIEF]** token bucket size. |
 | `MRFP_RL_REFILL_PER_SEC` | `20` | |
 | `MRFP_RL_TTL_PAD_MS` | `2000` | Added to the computed full-refill TTL. |
@@ -59,8 +59,12 @@ forbidden.
 | `MRFP_BREAKER__FAILURE_THRESHOLD` | `5` | Resilient mode only: consecutive failures before the breaker opens. |
 | `MRFP_BREAKER__COOLDOWN_S` | `5` | Resilient mode only: OPEN → HALF_OPEN delay; doubles after a failed probe. |
 | `MRFP_LOG_LEVEL` | `INFO` | |
-| `MRFP_CHAOS_MODE` | `0` | When `1`, `X-Chaos-Bypass` with the right token skips rate limiting. |
-| `MRFP_CHAOS_TOKEN` | unset | Required if `MRFP_CHAOS_MODE=1`. |
+| `MRFP_CHAOS_MODE` | `0` | When `1`, `X-Chaos-Bypass` with the right token skips rate limiting. Boot **fails** if set without a token. |
+| `MRFP_CHAOS_TOKEN` | **none** | No default, ever — a committed one is a permanent bypass. `make chaos` mints one per run and disarms on exit. |
+| `MRFP_ADMIN_TOKEN` | **none** | Guards `/admin/*` and `/debug/*`. **Unset disables those routes (404)**, never leaves them open. ([ADR-017](DECISIONS.md#adr-017)) |
+| `MRFP_METRICS_PUBLIC` | `1` | `/metrics` is exempt from the admin guard by default; scrapers rarely send bearer tokens and it mutates nothing. |
+| `MRFP_BODY_READ_TIMEOUT_S` | `5` | Bounds the inbound body read. An admission slot is held across it. ([ADR-019](DECISIONS.md#adr-019)) |
+| `MRFP_REQUIRE_REDIS` | `1` | Refuse to boot without Redis. Set `0` only for a deliberate Redis-less run. ([ADR-020](DECISIONS.md#adr-020)) |
 
 Region-image variables (in `region/region.env` plus per-service overrides):
 
@@ -115,10 +119,10 @@ defensible, and it is why the chaos harness can diff responses across a failover
 | `GET /healthz` | Process liveness **only**. Returns 200 while every region is dead. | no |
 | `GET /readyz` | 200 iff ≥1 region is currently believed usable; else 503. | no |
 | `GET /metrics` | Prometheus text exposition. | no |
-| `GET /admin/regions` | Per-region breaker state, last error, last success. | no |
-| `GET /debug/whoami` | Echoes peer address, XFF chain, and the resolved bucket identity. | no |
-| `GET /admin/ratelimit/bucket?id=` | Peek a bucket without consuming (`mode=peek`). | no |
-| `DELETE /admin/ratelimit/bucket?id=` | Reset a bucket, for demos. | no |
+| `GET /admin/regions` | Per-region breaker state, last error, last success. **Requires the admin token.** | no |
+| `GET /debug/whoami` | Peer address, XFF chain, resolved bucket identity. **Requires the admin token.** Does not echo the trusted-proxy list. | no |
+| `GET /admin/ratelimit?id=` | Peek a bucket without consuming. **Requires the admin token**; `id` must be an IP. | no |
+| `DELETE /admin/ratelimit?id=` | Reset a bucket. **Requires the admin token** — unauthenticated, this defeated the limiter entirely. | no |
 
 ### Control-plane routes (region)
 
@@ -241,6 +245,14 @@ Default trusted set is loopback only. It is **not** widened to RFC1918: Docker D
 bridge-gateway peer address, and trusting all of RFC1918 would make that peer trusted and hand every
 container-originated request full XFF authority.
 
+> **This section was violated by the deployed config and it mattered.** `docker-compose.yml` set
+> `MRFP_TRUSTED_PROXIES` to include `172.16.0.0/12` — the range containing the Docker bridge gateway
+> that every external request arrives from — so every client was treated as a trusted proxy and could
+> name its own rate-limit identity. An honest client got 21 of 60 requests through a 20/s limit; a
+> client rotating `X-Forwarded-For` got 60 of 60. Fixed in [ADR-018](DECISIONS.md#adr-018), and
+> `tests/unit/test_hardening.py` now asserts against the value compose actually ships rather than one
+> the test invents.
+
 **Measured on this host (Phase 4):** `curl -s localhost:8000/debug/whoami` reports
 `peer = 172.19.0.1` — the Docker Desktop bridge gateway — for traffic originating on the host. So
 **every host-side client shares one bucket** by default, exactly as predicted. That is why
@@ -319,3 +331,4 @@ for. They are not stylistic preferences.
 |---|---|
 | 2026-07-27 | Initial freeze, before any application code. |
 | 2026-08-07 | Post-review revision: headers scoped to 429 as well as 503; breaker env vars added; failure class/code vocabulary added (§8); `/admin/chaos` body schema added (§3). |
+| 2026-08-07 | Post-audit hardening: control plane authenticated and disabled-by-default; trusted proxies narrowed to loopback; body bounded before buffering; boot-time config validation; upstream response headers forwarded. ADR-017 through ADR-020. |

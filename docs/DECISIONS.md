@@ -367,3 +367,106 @@ than 3.82.
 
 **Consequence.** Slightly more files, and logic lives in shell scripts rather than the Makefile. In
 exchange, exit codes are trustworthy — which is the entire point of the chaos harness.
+
+---
+
+<a id="adr-017"></a>
+
+## ADR-017: The control plane is disabled by default, never open
+
+**Date:** 2026-08-07 · **Status:** accepted
+
+**Context.** A production-readiness audit found `/admin/regions`, `/admin/ratelimit`,
+`/debug/whoami` and `/metrics` all answering 200 to anyone who could reach the proxy — and
+`/admin/*` is exempt from rate limiting. `DELETE /admin/ratelimit?id=<self>` therefore resets your
+own bucket for free: measured, an honest client got 20 of 40 requests through a 20/s limit while an
+attacker resetting between batches got **100 of 100**. There was no auth primitive anywhere in
+`proxy/app/` to build on.
+
+**Decision.** `MRFP_ADMIN_TOKEN` guards `/admin/*` and `/debug/*`, compared with
+`secrets.compare_digest`. **Unset means the routes return 404**, not that they stand open — a
+control plane that can mutate rate-limit state must not be reachable because someone forgot to set a
+variable. `/metrics` has its own switch (`MRFP_METRICS_PUBLIC`, default on) because scrapers often
+cannot present a bearer token and it mutates nothing. `/debug/whoami` no longer echoes the trusted-
+proxy list, which told an attacker the spoof would be honoured. `?id=` is validated as an IP.
+
+**Consequence.** `make chaos` can no longer read the mode from `/admin/regions`; it reads
+`MRFP_MODE` off the container with `docker inspect` instead, needing no credential.
+
+---
+
+<a id="adr-018"></a>
+
+## ADR-018: Trust only the real ingress, and test the SHIPPED config
+
+**Date:** 2026-08-07 · **Status:** accepted
+
+**Context.** `docker-compose.yml` set `MRFP_TRUSTED_PROXIES` to
+`127.0.0.1/32,::1/128,172.16.0.0/12` so that XFF would be honoured for host traffic. That range
+contains the Docker bridge gateway every external request arrives from — so every client was a
+trusted proxy and could name its own rate-limit identity. Measured: an honest client got 21 of 60
+through a 20/s limit; a client rotating `X-Forwarded-For` got **60 of 60**.
+
+`CONTRACT.md §7` says "never widen to RFC1918" and `config.py` defaults to loopback. The compose
+file contradicted both.
+
+**The part worth remembering.** `test_spoofing_cannot_mint_fresh_buckets` existed and passed
+throughout. It passed because it built its own limiter with a LOOPBACK trust list. The property was
+correct, the code implementing it was correct, and production was still wide open — because the test
+chose a configuration the deployment does not use.
+
+**Decision.** Loopback only, overridable with the real ingress address when there is one.
+`tests/unit/test_hardening.py` now parses `docker-compose.yml` and asserts against the value that
+actually ships, rather than a value the test picked.
+
+**Consequence.** Without a real proxy in front, all host traffic shares the gateway's bucket — which
+is exactly what CONTRACT §7 already documented. The demo's 429 burst must be fired in parallel,
+which it already was.
+
+---
+
+<a id="adr-019"></a>
+
+## ADR-019: Bound the request body before reading it, not after
+
+**Date:** 2026-08-07 · **Status:** accepted
+
+**Context.** `ProxyRequest.from_starlette` was `body = await request.body()` followed by a length
+check. The check never protected anything: Starlette accumulates every chunk and joins them with no
+limit, so the cap only ever ran against a body already resident in memory — and peak is roughly
+twice the body, since the chunk list and the joined bytes coexist during the join. A single 512 MiB
+POST drove the container to its cgroup limit and it was OOM-killed; `restart: "no"` meant it stayed
+dead. ADR-006's claimed "256 KiB × 128 in-flight = bounded memory" ceiling did not exist.
+
+The admission semaphore made it worse: the slot is acquired *before* the read, and there was no
+inbound read deadline, so 130 sockets trickling ~130 bytes/second took `/v1/infer` to 100% 503 while
+`/healthz` still reported 200.
+
+**Decision.** Three bounds, cheapest first: reject on `Content-Length` before a byte is read; cap
+incrementally across `request.stream()` for chunked bodies that declare no length or lie about it;
+and wrap the whole read in `asyncio.timeout(MRFP_BODY_READ_TIMEOUT_S)`.
+
+**Consequence.** Measured after the fix: a 400 MB body moves container memory by 0.22 MiB and
+returns 413; 130 slow sockets leave the data plane serving 10 of 10 probes.
+
+---
+
+<a id="adr-020"></a>
+
+## ADR-020: Refuse to boot on a misconfiguration
+
+**Date:** 2026-08-07 · **Status:** accepted
+
+**Context.** pydantic-settings silently ignores an unrecognised variable, so `MRFP_MODE=resilent`
+meant literal, `MRFP_RL_FAIL_MODE=close` meant fail-open, and an unset `MRFP_REDIS_URL` meant the
+token bucket quietly became per-process — with N replicas enforcing N times the configured limit,
+signalled only by `redis: false` in one log line. `config.py` even carried a comment claiming an
+unset value would raise at boot. It did not.
+
+**Decision.** `Settings.validate_for_boot()` returns the problems that must stop the process:
+unknown enum values, missing Redis (waivable with `MRFP_REQUIRE_REDIS=0`), a total budget too small
+for `3 × (connect + read)` — which would silently mean the third region is never attempted — chaos
+mode armed without an explicit token, and a non-positive rate limit. The lifespan logs each and
+raises.
+
+**Consequence.** A typo is now a failed deploy instead of a silent behaviour change.

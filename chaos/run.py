@@ -35,15 +35,27 @@ def _c(code: str, text: str) -> str:
 
 
 async def proxy_mode() -> str:
-    """Ask the proxy which mode it is in, rather than guessing from env."""
-    import httpx
+    """Read the mode off the running container.
 
-    try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            resp = await client.get("http://127.0.0.1:8000/admin/regions")
-        return resp.json().get("mode", "literal")
-    except Exception:
-        return "literal"
+    Not from /admin/regions any more: the control plane requires a bearer token
+    now, and the harness should not need admin credentials just to label a run.
+    docker inspect reports the same value with no privilege beyond the daemon
+    access the harness already has.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        "docker",
+        "inspect",
+        "-f",
+        "{{range .Config.Env}}{{println .}}{{end}}",
+        PROXY_CONTAINER,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    out, _ = await proc.communicate()
+    for line in out.decode(errors="replace").splitlines():
+        if line.startswith("MRFP_MODE="):
+            return line.partition("=")[2].strip() or "literal"
+    return "literal"
 
 
 async def preflight(cfg: FloodConfig) -> None:
@@ -72,6 +84,25 @@ async def preflight(cfg: FloodConfig) -> None:
         raise SystemExit(f"preflight: {cfg.url} returned {resp.status_code}, expected 200")
     if not resp.headers.get("x-served-by-region"):
         raise SystemExit("preflight: X-Served-By-Region is missing — the harness keys on it")
+
+    # Without a working bypass the flood measures the rate limiter, not
+    # failover: at 50 rps against a 20-token shared bucket most of the run
+    # would 429 itself and every assertion would be about the wrong thing.
+    if not cfg.bypass_token:
+        raise SystemExit(
+            "preflight: no MRFP_CHAOS_TOKEN. Run via `make chaos`, which mints one per run."
+        )
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        probe = await client.post(
+            cfg.url,
+            json=cfg.payload,
+            headers={"content-type": "application/json", "x-chaos-bypass": cfg.bypass_token},
+        )
+    if probe.headers.get("x-ratelimit-mode") is not None:
+        raise SystemExit(
+            "preflight: the rate-limit bypass is not being honoured (proxy needs "
+            "MRFP_CHAOS_MODE=1 with this token). `make chaos` arms it."
+        )
 
 
 def write_artifacts(result: ScenarioResult, logs: list[dict], run_dir: Path) -> None:

@@ -56,12 +56,26 @@ services:
       MRFP_POOL_TIMEOUT_MS: "50"
       MRFP_TOTAL_BUDGET_MS: "900"
       MRFP_MAX_INFLIGHT: "128"
-      # Docker Desktop presents the bridge gateway as the peer for host
-      # traffic, so the gateway must be trusted for XFF to be consulted at all.
-      # Deliberately narrow: NOT all of RFC1918.
-      MRFP_TRUSTED_PROXIES: "127.0.0.1/32,::1/128,172.16.0.0/12"
+      MRFP_BODY_READ_TIMEOUT_S: "5"
+      # LOOPBACK ONLY. This previously included 172.16.0.0/12 so that XFF would
+      # be honoured for host traffic — but the Docker bridge gateway that every
+      # external request arrives from lives in that range, which made every
+      # client a trusted proxy free to name its own rate-limit identity.
+      # Measured before the fix: an honest client got 21/60 through a 20/s
+      # limit while an XFF-rotating client got 60/60.
+      #
+      # With loopback only, the gateway is untrusted, XFF is ignored, and all
+      # host traffic shares the gateway's bucket — which is exactly what
+      # CONTRACT section 7 describes. Add the REAL ingress address here (and
+      # only that) when there is a real proxy in front.
+      MRFP_TRUSTED_PROXIES: "${MRFP_TRUSTED_PROXIES:-127.0.0.1/32,::1/128}"
+      # Guards /admin/* and /debug/*. Unset means those routes 404 rather than
+      # standing open; the compose default is a local dev value only.
+      MRFP_ADMIN_TOKEN: "${MRFP_ADMIN_TOKEN:-}"
+      # The bypass skips rate limiting entirely, so it ships DISARMED and the
+      # token has no default — boot fails if chaos mode is on without one.
       MRFP_CHAOS_MODE: "${MRFP_CHAOS_MODE:-0}"
-      MRFP_CHAOS_TOKEN: "${MRFP_CHAOS_TOKEN:-dev-chaos-bypass}"
+      MRFP_CHAOS_TOKEN: "${MRFP_CHAOS_TOKEN:-}"
     depends_on:
       # Redis only. The proxy MUST boot with every region dead — that is the
       # scenario it exists to survive, so it cannot depend on them being up.
