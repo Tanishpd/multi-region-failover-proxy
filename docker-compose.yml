@@ -31,6 +31,44 @@ x-region: &region
   mem_limit: 256m
 
 services:
+  # --- the proxy ------------------------------------------------------------
+  mrfp-proxy:
+    build:
+      context: ./proxy
+    image: mrfp/proxy:dev
+    container_name: mrfp-proxy
+    networks: [mrfp-net]
+    restart: "no"
+    stop_grace_period: 3s
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      # The region registry, read-only. Mounted rather than baked so a priority
+      # change does not need an image rebuild.
+      - ./config:/config:ro
+    environment:
+      MRFP_MODE: "${MRFP_MODE:-literal}"
+      MRFP_REDIS_URL: redis://redis:6379/0
+      MRFP_REGIONS_FILE: /config/regions.yaml
+      MRFP_LOG_LEVEL: "${MRFP_LOG_LEVEL:-INFO}"
+      MRFP_READ_TIMEOUT_MS: "200"
+      MRFP_CONNECT_TIMEOUT_MS: "100"
+      MRFP_POOL_TIMEOUT_MS: "50"
+      MRFP_TOTAL_BUDGET_MS: "900"
+      MRFP_MAX_INFLIGHT: "128"
+      # Docker Desktop presents the bridge gateway as the peer for host
+      # traffic, so the gateway must be trusted for XFF to be consulted at all.
+      # Deliberately narrow: NOT all of RFC1918.
+      MRFP_TRUSTED_PROXIES: "127.0.0.1/32,::1/128,172.16.0.0/12"
+      MRFP_CHAOS_MODE: "${MRFP_CHAOS_MODE:-0}"
+      MRFP_CHAOS_TOKEN: "${MRFP_CHAOS_TOKEN:-dev-chaos-bypass}"
+    depends_on:
+      # Redis only. The proxy MUST boot with every region dead — that is the
+      # scenario it exists to survive, so it cannot depend on them being up.
+      redis:
+        condition: service_healthy
+    mem_limit: 512m
+
   # --- the three regions ----------------------------------------------------
   # container_name is pinned because the brief specifies
   # `docker stop us-east-1-endpoint` literally and the chaos harness runs

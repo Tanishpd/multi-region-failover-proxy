@@ -134,20 +134,31 @@ region paid for it anyway.
 This table is the intellectual core of the project. Each row is a different physical thing happening
 on the wire, and they are *not* interchangeable.
 
-| Injection | Exception | Class | Typical latency | Safe to replay? |
+Latencies below marked **measured** come from this machine, via
+`X-Failover-Path` on real requests. The rest are the configured timeout values.
+
+| Injection | Exception | Class | Latency | Safe to replay? |
 |---|---|---|---|---|
-| `docker stop` | `ConnectError` — Docker's embedded resolver withdraws the A record, so DNS fails | NOT_SENT | ~2 ms | yes |
-| `docker stop` with a warm pool | `RemoteProtocolError` — the server closed a pooled connection mid-flight | MAYBE_SENT | ~2 ms | only if idempotent |
-| `docker kill` | `ReadError` / `RemoteProtocolError` — RST on pooled sockets | MAYBE_SENT | ~2 ms | only if idempotent |
+| `docker stop` | `ConnectError` — Docker's embedded resolver withdraws the A record, so DNS fails (`[Errno -2] Name or service not known`) | NOT_SENT | **2.5–9.3 ms, measured** | yes |
+| `docker stop` with a warm pool | `RemoteProtocolError` — the server closed a pooled connection mid-flight | MAYBE_SENT | ~ms | only if idempotent |
+| `docker kill` | `ReadError` / `RemoteProtocolError` — RST on pooled sockets | MAYBE_SENT | ~ms | only if idempotent |
 | `docker pause` | `ReadTimeout` — the kernel still ACKs the SYN from the listen backlog, so connect *succeeds*, then nothing | MAYBE_SENT | **200 ms** | only if idempotent |
-| chaos `blackhole` | `ReadTimeout` | MAYBE_SENT | 200 ms | only if idempotent |
-| `docker network disconnect` | `ConnectError` — the endpoint's DNS record is withdrawn, same as `stop` | NOT_SENT | ~2 ms | yes |
+| chaos `blackhole` | `ReadTimeout` | MAYBE_SENT | **203–211 ms, measured** | only if idempotent |
+| `docker network disconnect` | `ConnectError` — the endpoint's DNS record is withdrawn, same as `stop` | NOT_SENT | ~ms | yes |
+| several regions stopped at once | `ConnectTimeout` — observed transiently while the resolver state churns; the record has not withdrawn yet, so the SYN goes to a dead address | NOT_SENT | **~101 ms, measured** | yes |
 | pool saturated | `PoolTimeout` | NOT_SENT | 50 ms | yes |
 
 **The headline: the brief's own chaos command cannot exercise the brief's own timeout.**
-`docker stop` fails in ~2 ms via DNS. Only `docker pause` or the `blackhole` chaos mode produces a
-real `ReadTimeout` at 200 ms. That's why the scenario matrix has both, and why the chaos report puts
-their latency signatures side by side.
+Measured on this machine through one unchanged code path:
+
+```
+docker stop  ->  us-east-1:connect_error(2.7ms)    DNS withdrawn; the read timeout is never reached
+blackhole    ->  us-east-1:read_timeout(203.5ms)   connect succeeded, then silence
+```
+
+A ~75× difference in detection latency, and a different exception class, from the same `except`
+clause. If you only ever inject `docker stop`, the 200 ms timeout the brief asks for is completely
+unexercised and nothing tells you. That is why the scenario matrix carries both.
 
 Two library facts that trip people up:
 

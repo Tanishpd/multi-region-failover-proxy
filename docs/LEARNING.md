@@ -115,16 +115,17 @@ different exceptions, different latencies, and different correct responses.
 
 | What you do | What the client sees | How long it takes |
 |---|---|---|
-| `docker stop` | `ConnectError` — Docker's DNS resolver withdraws the record, so the *name* stops resolving | ~2 ms |
-| `docker stop`, with a warm connection pool | `RemoteProtocolError` — no DNS lookup happens, you write into a socket whose peer is gone | ~2 ms |
-| `docker kill` | `ReadError` / `RemoteProtocolError` — RST on pooled sockets | ~2 ms |
-| `docker pause` | `ReadTimeout` — the kernel still ACKs the SYN from the listen backlog, so connect *succeeds*, then silence | **200 ms** |
-| `docker network disconnect` | `ConnectError` — the endpoint's DNS record goes with it | ~2 ms |
+| `docker stop` | `ConnectError` — Docker's DNS resolver withdraws the record, so the *name* stops resolving | **2.5–9.3 ms, measured** |
+| `docker stop`, with a warm connection pool | `RemoteProtocolError` — no DNS lookup happens, you write into a socket whose peer is gone | ~ms |
+| `docker kill` | `ReadError` / `RemoteProtocolError` — RST on pooled sockets | ~ms |
+| `docker pause` / chaos `blackhole` | `ReadTimeout` — the kernel still ACKs the SYN from the listen backlog, so connect *succeeds*, then silence | **203–211 ms, measured** |
+| `docker network disconnect` | `ConnectError` — the endpoint's DNS record goes with it | ~ms |
 
 **The punchline for this brief:** it asks for a 200 ms timeout *and* specifies `docker stop` as the
-fault injection. Those two never meet. `docker stop` fails via DNS in ~2 ms — the read timeout is
-never reached. If you only ever test with `docker stop`, your headline timeout is completely
-unexercised and you'd never know.
+fault injection. Those two never meet. Measured here: `connect_error(2.7ms)` for a stop against
+`read_timeout(203.5ms)` for a blackhole — a ~75× difference through the same `except` clause. If you
+only ever test with `docker stop`, your headline timeout is completely unexercised and nothing tells
+you.
 
 Hence `make chaos-pause-us-east`: same code path, same `except` clause, ~100× the latency, a
 different exception class.

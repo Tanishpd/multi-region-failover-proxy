@@ -3,8 +3,8 @@
 # Start the stack and wait for health.
 #
 # Usage: up.sh [regions|all]
-#   regions  regions + redis, without the proxy (Phase 1)
-#   all      everything (default once the proxy exists)
+#   regions  regions + redis, without the proxy
+#   all      everything (default)
 set -euo pipefail
 
 # shellcheck source=ops/scripts/compose.sh
@@ -13,25 +13,20 @@ require_daemon
 
 SCOPE="${1:-all}"
 
-# Bring the images up without building. `make build` is a separate target
-# because a cold build runs 3-6 minutes and a health-wait deadline started here
-# would expire during it and report a false failure.
-if [[ "$SCOPE" == "regions" ]]; then
-  TARGETS=("${REGIONS[@]}" redis redis-sentinel-seed)
-else
-  TARGETS=()
-fi
+# The wait list holds only LONG-RUNNING services. redis-sentinel-seed writes the
+# test sentinel key and exits 0, and `--wait` reads any exit — including a clean
+# one — as a failed startup.
+case "$SCOPE" in
+  regions) WAIT_FOR=(redis "${REGIONS[@]}") ;;
+  all)     WAIT_FOR=(redis "${REGIONS[@]}" mrfp-proxy) ;;
+  *)       printf 'up: unknown scope %q (expected: regions|all)\n' "$SCOPE" >&2; exit 2 ;;
+esac
 
-printf 'up: starting %s\n' "${SCOPE}"
+printf 'up: starting %s\n' "$SCOPE"
+dc up -d --wait --wait-timeout 90 "${WAIT_FOR[@]}"
 
-# --wait blocks until every service with a healthcheck is healthy. The seed
-# container runs to completion and exits 0, so it is excluded from the wait.
-if [[ ${#TARGETS[@]} -gt 0 ]]; then
-  dc up -d --wait --wait-timeout 90 "${REGIONS[@]}" redis
-  dc up -d redis-sentinel-seed
-else
-  dc up -d --wait --wait-timeout 90
-fi
+# Seed after Redis is healthy; run to completion rather than waiting on it.
+dc up -d --no-deps redis-sentinel-seed >/dev/null
 
 printf '\n'
 bash "$(dirname "${BASH_SOURCE[0]}")/health.sh"

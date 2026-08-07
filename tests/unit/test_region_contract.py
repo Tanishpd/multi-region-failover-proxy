@@ -153,6 +153,23 @@ def test_compose_matches_the_region_registry() -> None:
         assert f"127.0.0.1:{region['host_port']}:8080" in svc["ports"]
 
 
+def _load_region_module(name: str):
+    """Load a region module by path, bypassing the package-name collision.
+
+    Both images use `app` as their package root (WORKDIR /app), which is right
+    inside a container but collides on the host test runner: whichever of
+    proxy/app or region/app is imported first owns the name. Loading by file
+    location sidesteps it without renaming a package that is correct in situ.
+    """
+    import importlib.util
+
+    path = ROOT / "region" / "app" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(f"_region_{name}", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_inference_is_deterministic_and_region_independent() -> None:
     """Why replaying a POST to a second region is safe.
 
@@ -160,10 +177,7 @@ def test_inference_is_deterministic_and_region_independent() -> None:
     failover cannot change what the caller sees. Verified live across all three
     containers; this pins the property in the unit suite. (ADR-006)
     """
-    import sys
-
-    sys.path.insert(0, str(ROOT / "region"))
-    from app import inference
+    inference = _load_region_module("inference")
 
     a = inference.complete("hello", 6, None)
     b = inference.complete("hello", 6, None)

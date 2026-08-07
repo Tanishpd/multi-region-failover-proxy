@@ -69,7 +69,7 @@ health:
 	@bash ops/scripts/health.sh
 
 logs:
-	@bash ops/scripts/_todo.sh 2 "make logs"
+	@bash ops/scripts/logs.sh
 
 # --- tests ------------------------------------------------------------------
 # test-unit is the ONLY target that must work with the Docker daemon stopped.

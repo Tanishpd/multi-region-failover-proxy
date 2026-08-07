@@ -1,14 +1,26 @@
 # Host virtualenv (python3.13) for chaos/ and tests/.
 #
-# Pure-Python only, on purpose: nothing here needs to compile, so `make venv`
-# cannot fail on a missing wheel. Anything that imports the proxy or region app
-# runs inside a container instead. (ADR-015)
+# The constraint is that every one of these installs from a prebuilt wheel on
+# arm64 python3.13 — `make venv` must never need a compiler. (pydantic-core is
+# Rust, but ships cp313 aarch64 wheels.) Versions are pinned to match
+# proxy/requirements.txt so the unit suite exercises the same library
+# behaviour the container does. (ADR-015)
+#
+# The unit tests import the real proxy app rather than a stand-in: testing a
+# reimplementation of the failover loop would prove nothing about the one that
+# ships.
 
+# --- shared with proxy/requirements.txt (keep versions in step) --------------
 httpx==0.28.1
+starlette==0.45.3
+pydantic==2.10.6
+pydantic-settings==2.7.1
+PyYAML==6.0.2
+redis==5.2.1
+
+# --- host-only tooling ------------------------------------------------------
 pytest==8.3.4
 pytest-asyncio==0.25.2
 respx==0.22.0
-redis==5.2.1
-PyYAML==6.0.2
 rich==13.9.4
 ruff==0.9.6
