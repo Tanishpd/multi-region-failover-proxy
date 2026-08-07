@@ -101,3 +101,61 @@ def test_sentinels_without_a_master_name_fail_at_boot_not_at_first_request() -> 
     limiter reads as 'Redis is down' and silently degrades every caller."""
     settings = Settings(redis_sentinels="s1:26379", redis_master_name="", require_redis=True)
     assert any("MRFP_REDIS_MASTER_NAME" in p for p in settings.validate_for_boot())
+
+
+# --- the prod profile must be able to REACH all of this ---------------------
+
+import re  # noqa: E402
+
+PROD_COMPOSE = (ROOT / "deploy" / "compose.prod.yml").read_text()
+
+
+def _prod_proxy_env() -> set[str]:
+    """MRFP_* keys the prod compose passes to the proxy service."""
+    start = PROD_COMPOSE.index("  proxy:")
+    end = PROD_COMPOSE.index("\n  us-east-1-endpoint:", start)
+    return set(re.findall(r"^\s+(MRFP_[A-Z0-9_]+):", PROD_COMPOSE[start:end], flags=re.M))
+
+
+def test_the_prod_profile_can_actually_be_pointed_at_sentinel() -> None:
+    """Third instance of the same bug class.
+
+    MRFP_STREAMING_ENABLED and MRFP_IDEMPOTENCY_ENABLED were each implemented,
+    tested, and unreachable because compose never forwarded them. Sentinel
+    support was the third: the prod compose hardcoded MRFP_REDIS_URL as
+    required and passed no sentinel variables, so an HA topology could not be
+    deployed without editing the file. A feature the deployment cannot select
+    is a feature that does not exist.
+    """
+    env = _prod_proxy_env()
+    assert "MRFP_REDIS_SENTINELS" in env
+    assert "MRFP_REDIS_MASTER_NAME" in env
+
+
+def test_the_proxy_is_given_the_redis_password_in_prod() -> None:
+    """The silent one.
+
+    Prod runs Redis with --requirepass. If the proxy is not given the password,
+    every command returns NOAUTH; `AuthenticationError` is a `RedisError`, so
+    the limiter catches it and fails open exactly as designed — and production
+    has no rate limiting at all, announced by nothing louder than a
+    `rate_limit_degraded` log line.
+    """
+    assert "MRFP_REDIS_PASSWORD" in _prod_proxy_env()
+
+
+def test_the_redis_url_is_not_unconditionally_required() -> None:
+    """`:?` on the URL makes a Sentinel-only deployment impossible to express."""
+    assert "MRFP_REDIS_URL: ${MRFP_REDIS_URL:?" not in PROD_COMPOSE
+
+
+def test_the_password_reaches_the_plain_url_client_too() -> None:
+    """It applied only to the Sentinel path, which is how prod ended up
+    unauthenticated on the topology it actually ships."""
+    client = build_redis("redis://127.0.0.1:6380/0", password="hunter2")
+    assert client.connection_pool.connection_kwargs.get("password") == "hunter2"
+
+
+def test_an_unset_password_does_not_clobber_one_embedded_in_the_url() -> None:
+    client = build_redis("redis://:fromurl@127.0.0.1:6380/0", password="")
+    assert client.connection_pool.connection_kwargs.get("password") == "fromurl"

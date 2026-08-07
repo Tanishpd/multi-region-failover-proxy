@@ -86,7 +86,21 @@ def build_redis(
     if sentinels:
         return _build_sentinel(sentinels, master_name, password)
 
-    pool = BlockingConnectionPool.from_url(url, **_TUNING)
+    kwargs = dict(_TUNING)
+    # The password applies to BOTH topologies. It previously applied only to the
+    # Sentinel path, which made the production profile silently unauthenticated:
+    # compose demands MRFP_REDIS_PASSWORD and starts Redis with --requirepass,
+    # the operator sets a plain redis://host:6379/0, and every command comes
+    # back NOAUTH. `AuthenticationError` is a `RedisError`, so the limiter
+    # catches it, fails open exactly as designed, and rate limiting does not
+    # exist in production with nothing louder than a `rate_limit_degraded` log.
+    #
+    # Only set when non-empty, so a password already embedded in the URL is not
+    # clobbered by an unset variable.
+    if password:
+        kwargs["password"] = password
+
+    pool = BlockingConnectionPool.from_url(url, **kwargs)
     return Redis(connection_pool=pool)
 
 

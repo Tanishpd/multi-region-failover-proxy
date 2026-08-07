@@ -53,7 +53,18 @@ services:
       - ${MRFP_API_KEYS_FILE:-./keys.example.json}:/secrets/keys.json:ro
     environment:
       MRFP_PROFILE: prod
-      MRFP_REDIS_URL: ${MRFP_REDIS_URL:?set MRFP_REDIS_URL}
+      # NOT `:?required`, because Sentinel is the other legal way to reach Redis
+      # and compose cannot express "one of these two". The boot validator does:
+      # it refuses to start when neither is set, with a message that says why.
+      MRFP_REDIS_URL: ${MRFP_REDIS_URL:-}
+      # Self-hosted HA. Set these INSTEAD of the URL to have the client discover
+      # the current primary itself. (ADR-027)
+      MRFP_REDIS_SENTINELS: ${MRFP_REDIS_SENTINELS:-}
+      MRFP_REDIS_MASTER_NAME: ${MRFP_REDIS_MASTER_NAME:-mrfp-master}
+      # The proxy needs this as much as the Redis container does. Without it
+      # here, a bundled Redis running --requirepass answers NOAUTH to every
+      # command, the limiter fails open, and rate limiting is silently absent.
+      MRFP_REDIS_PASSWORD: ${MRFP_REDIS_PASSWORD:-}
       MRFP_REGIONS_FILE: /config/regions.yaml
       # MUST name the real ingress. The prod profile refuses to boot on
       # loopback-only, because that means every client shares one bucket.
