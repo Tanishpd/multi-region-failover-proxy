@@ -346,3 +346,10 @@ Measured on this stack:
 A run showing 0 recoveries means the restart never emptied the cache and the
 path was not exercised; a run showing one per request means the generation
 counter has regressed.
+
+**Run `make up` afterwards.** Restarting Redis is what makes this drill work,
+and it also drops the `mrfp:test-guard` key in db 15 — Redis here is cache-only
+by design ([ADR-014](DECISIONS.md#adr-014)). `make test` then refuses to run
+the integration suite, correctly, because it cannot confirm the Redis in front
+of it is ours rather than the developer's own on the next port. `make up`
+re-runs the seed container.
