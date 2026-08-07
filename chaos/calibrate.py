@@ -216,11 +216,23 @@ def derive(profiles: list[RegionProfile], attempts: int, connect_ms: int) -> dic
     read_timeout_ms = int(worst * HEADROOM) + 1
 
     all_gaps = [g for prof in profiles for g in prof.stream_gaps_ms]
-    gap_p99 = p(all_gaps, 0.99)
-    # Floored at 1s: below that, ordinary scheduler jitter on a loaded host
-    # starts killing healthy streams, and the failure it exists to catch — a
-    # region that has stopped producing — is never a sub-second event.
-    inter_chunk_s = max(1.0, round(gap_p99 * HEADROOM / 1000.0, 2))
+    if all_gaps:
+        gap_p99 = p(all_gaps, 0.99)
+        # Floored at 1s: below that, ordinary scheduler jitter on a loaded host
+        # starts killing healthy streams, and the failure it exists to catch —
+        # a region that has stopped producing — is never a sub-second event.
+        inter_chunk_s = max(1.0, round(gap_p99 * HEADROOM / 1000.0, 2))
+    else:
+        # NO SAMPLES. Say so; do not derive.
+        #
+        # The first version applied the 1s floor unconditionally, so a run that
+        # collected zero chunks still printed a confident
+        # `MRFP_STREAM_INTER_CHUNK_TIMEOUT_S = 1.0` — a number with no
+        # measurement behind it, produced by the very tool built to stop numbers
+        # having no measurement behind them. It surfaced the moment the regions
+        # were pointed at a real backend, whose passthrough did not stream.
+        gap_p99 = None
+        inter_chunk_s = None
 
     return {
         "headroom": HEADROOM,
@@ -228,7 +240,8 @@ def derive(profiles: list[RegionProfile], attempts: int, connect_ms: int) -> dic
         "total_budget_ms": attempts * (connect_ms + read_timeout_ms),
         "stream_inter_chunk_timeout_s": inter_chunk_s,
         "measured_worst_p99_ms": round(worst, 2),
-        "measured_stream_gap_p99_ms": round(gap_p99, 2),
+        "measured_stream_gap_p99_ms": round(gap_p99, 2) if gap_p99 is not None else None,
+        "stream_samples": len(all_gaps),
     }
 
 
@@ -242,7 +255,10 @@ def check(derived: dict, configured: dict) -> list[str]:
         ("stream_inter_chunk_timeout_s", "s"),
     ):
         want, have = derived[key], configured.get(key)
-        if have is None:
+        # `want is None` means nothing was measured for this setting. Gating on
+        # an unmeasured requirement is how the tool would start inventing the
+        # numbers it exists to replace.
+        if have is None or want is None:
             continue
         if have < want:
             problems.append(
@@ -378,12 +394,20 @@ def _render(report: dict) -> str:
     lines += [
         "",
         f"worst p99 across all regions and token counts: {d['measured_worst_p99_ms']}ms",
-        f"streaming inter-chunk gap p99:                 {d['measured_stream_gap_p99_ms']}ms",
+        (
+            f"streaming inter-chunk gap p99:                 {d['measured_stream_gap_p99_ms']}ms"
+            if d["measured_stream_gap_p99_ms"] is not None
+            else "streaming inter-chunk gap p99:                 NOT MEASURED (0 chunks seen)"
+        ),
         "",
         f"derived at {d['headroom']}x headroom:",
         f"  MRFP_READ_TIMEOUT_MS               = {d['read_timeout_ms']}",
         f"  MRFP_TOTAL_BUDGET_MS               = {d['total_budget_ms']}",
-        f"  MRFP_STREAM_INTER_CHUNK_TIMEOUT_S  = {d['stream_inter_chunk_timeout_s']}",
+        (
+            f"  MRFP_STREAM_INTER_CHUNK_TIMEOUT_S  = {d['stream_inter_chunk_timeout_s']}"
+            if d["stream_inter_chunk_timeout_s"] is not None
+            else "  MRFP_STREAM_INTER_CHUNK_TIMEOUT_S  = (not derived: nothing streamed)"
+        ),
     ]
     return "\n".join(lines)
 
@@ -442,14 +466,22 @@ def doc_blocks(report: dict) -> dict[str, str]:
     derived = "\n".join(
         [
             f"Worst p99 across all regions and token counts: **{d['measured_worst_p99_ms']} ms**. "
-            f"Streaming inter-chunk gap p99: **{d['measured_stream_gap_p99_ms']} ms**.",
+            + (
+                f"Streaming inter-chunk gap p99: **{d['measured_stream_gap_p99_ms']} ms** "
+                f"over {d['stream_samples']} chunks."
+                if d["measured_stream_gap_p99_ms"] is not None
+                else "Streaming was **not measured** — no chunks were observed, so no "
+                "inter-chunk timeout is derived here."
+            ),
             "",
             f"At {d['headroom']}x headroom:",
             "",
             "```",
             f"MRFP_READ_TIMEOUT_MS              = {d['read_timeout_ms']}",
             f"MRFP_TOTAL_BUDGET_MS              = {d['total_budget_ms']}",
-            f"MRFP_STREAM_INTER_CHUNK_TIMEOUT_S = {d['stream_inter_chunk_timeout_s']}",
+            f"MRFP_STREAM_INTER_CHUNK_TIMEOUT_S = {d['stream_inter_chunk_timeout_s']}"
+            if d["stream_inter_chunk_timeout_s"] is not None
+            else "MRFP_STREAM_INTER_CHUNK_TIMEOUT_S = (not derived: nothing streamed)",
             "```",
         ]
     )

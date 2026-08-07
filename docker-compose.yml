@@ -116,6 +116,13 @@ services:
       MRFP_REGION_ZONE: us-east-1a
       MRFP_BASE_LATENCY_MS: "15"
       MRFP_JITTER_MS: "5"
+      # Point a region at a REAL OpenAI-compatible endpoint and it stops faking.
+      # Empty by default: the chaos matrix must never depend on someone else's
+      # inference queue. Set per-service (not in the x-region-common anchor)
+      # because a per-service `environment:` REPLACES the anchor's entirely.
+      MRFP_UPSTREAM_BASE_URL: "${MRFP_UPSTREAM_BASE_URL:-}"
+      MRFP_UPSTREAM_MODEL: "${MRFP_UPSTREAM_MODEL:-gpt-4o-mini}"
+      MRFP_UPSTREAM_API_KEY: "${MRFP_UPSTREAM_API_KEY:-}"
     ports:
       - "127.0.0.1:9001:8080"
 
@@ -127,6 +134,13 @@ services:
       MRFP_REGION_ZONE: eu-west-1b
       MRFP_BASE_LATENCY_MS: "60"
       MRFP_JITTER_MS: "10"
+      # Point a region at a REAL OpenAI-compatible endpoint and it stops faking.
+      # Empty by default: the chaos matrix must never depend on someone else's
+      # inference queue. Set per-service (not in the x-region-common anchor)
+      # because a per-service `environment:` REPLACES the anchor's entirely.
+      MRFP_UPSTREAM_BASE_URL: "${MRFP_UPSTREAM_BASE_URL:-}"
+      MRFP_UPSTREAM_MODEL: "${MRFP_UPSTREAM_MODEL:-gpt-4o-mini}"
+      MRFP_UPSTREAM_API_KEY: "${MRFP_UPSTREAM_API_KEY:-}"
     ports:
       - "127.0.0.1:9002:8080"
 
@@ -138,6 +152,13 @@ services:
       MRFP_REGION_ZONE: ap-southeast-1c
       MRFP_BASE_LATENCY_MS: "150"
       MRFP_JITTER_MS: "20"
+      # Point a region at a REAL OpenAI-compatible endpoint and it stops faking.
+      # Empty by default: the chaos matrix must never depend on someone else's
+      # inference queue. Set per-service (not in the x-region-common anchor)
+      # because a per-service `environment:` REPLACES the anchor's entirely.
+      MRFP_UPSTREAM_BASE_URL: "${MRFP_UPSTREAM_BASE_URL:-}"
+      MRFP_UPSTREAM_MODEL: "${MRFP_UPSTREAM_MODEL:-gpt-4o-mini}"
+      MRFP_UPSTREAM_API_KEY: "${MRFP_UPSTREAM_API_KEY:-}"
     ports:
       - "127.0.0.1:9003:8080"
 

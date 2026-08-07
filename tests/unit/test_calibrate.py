@@ -114,3 +114,37 @@ def test_check_is_silent_when_every_region_covers_the_api_limit() -> None:
         {"region": "us-east-1", "serviceable_max_tokens": 512, "schema_max_tokens": 512}
     ]
     assert check(derived, {"read_timeout_ms": 30_000}) == []
+
+
+# --- the tool must not derive from nothing (ADR-028) ------------------------
+
+
+def test_no_stream_samples_derives_NOTHING() -> None:
+    """The tool reproducing the disease it treats.
+
+    The first version applied a 1s floor unconditionally, so a run that
+    collected zero chunks still printed a confident
+    `MRFP_STREAM_INTER_CHUNK_TIMEOUT_S = 1.0` — a number with no measurement
+    behind it, from the tool built to stop numbers having no measurement behind
+    them. It surfaced the moment the regions were pointed at a real backend
+    whose passthrough did not stream.
+    """
+    derived = derive([profile(20.0, 0.25)], attempts=2, connect_ms=100)
+    assert derived["stream_inter_chunk_timeout_s"] is None
+    assert derived["measured_stream_gap_p99_ms"] is None
+    assert derived["stream_samples"] == 0
+
+
+def test_an_unmeasured_requirement_cannot_fail_the_gate() -> None:
+    """Gating on something never measured is how the tool would start inventing
+    the numbers it exists to replace."""
+    derived = derive([profile(20.0, 0.25)], attempts=2, connect_ms=100)
+    assert check(derived, {"stream_inter_chunk_timeout_s": 0.001}) == []
+
+
+def test_stream_samples_are_counted_when_present() -> None:
+    prof = profile(20.0, 0.25)
+    prof.stream_gaps_ms = [5.0] * 40
+    derived = derive([prof], attempts=2, connect_ms=100)
+    assert derived["stream_samples"] == 40
+    assert derived["measured_stream_gap_p99_ms"] == 5.0

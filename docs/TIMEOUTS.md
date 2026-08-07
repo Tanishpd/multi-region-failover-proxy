@@ -36,16 +36,30 @@ timeout is below what was measured.
 ## What it honestly does not tell you
 
 It measures whatever is behind the regions, and it labels what that was. The run
-below says `backend: mock`, and numbers derived from the mock describe the mock.
-This is a procedure that *can* measure production, not evidence *about*
-production. Point it at a real endpoint and re-read this file:
+below says `backend: upstream`, so these numbers came from a real model —
+`qwen2.5:0.5b` served by a local Ollama. Reproduce with any OpenAI-compatible
+endpoint:
 
 ```
-MRFP_UPSTREAM_BASE_URL=https://api.example.com \
-MRFP_UPSTREAM_MODEL=your-model \
-MRFP_UPSTREAM_API_KEY=sk-... \
+ollama pull qwen2.5:0.5b        # or point at any OpenAI-compatible API
+MRFP_UPSTREAM_BASE_URL=http://host.docker.internal:11434 \
+MRFP_UPSTREAM_MODEL=qwen2.5:0.5b \
   docker compose up -d && make calibrate
 ```
+
+**Three caveats that bound how far these numbers travel.**
+
+1. **A small model on a laptop is not your production fleet.** Re-run this
+   against the hardware you deploy on; that is the entire point of it being a
+   command rather than a constant.
+2. **Run-to-run variance is large.** Two consecutive runs against the same model
+   derived 15313 ms and 7929 ms — a 1.9x spread, from nothing but contention on
+   a shared machine. This is *why* the headroom multiple exists, and why a single
+   run is a starting point rather than an answer.
+3. **The per-region rows are one backend measured three times.** All three
+   regions proxy to the same Ollama instance, so the spread in `ms/token`
+   (0.759 / 1.036 / 2.224) is measurement noise, not geography. Against genuinely
+   separate endpoints these rows would mean what they say.
 
 It also measures **service** latency at low concurrency, which is what a
 per-attempt timeout must accommodate. Latency under load is a different
@@ -58,40 +72,44 @@ region*. It is also, silently, a **capability ceiling**: any request whose hones
 service time exceeds it can never be served by that region, however healthy the
 region is.
 
-At the brief's 200 ms, measured on this stack:
+Against the **mock**, this showed up as an edge case: ap-southeast-1 answered 8
+tokens in ~183 ms but 512 tokens in ~310 ms, so only the largest requests fell
+off the cliff.
 
-- ap-southeast-1 answers 8 tokens in ~183 ms and 512 tokens in ~310 ms;
-- so a 512-token request that fails over to it returns **503 — from a region
-  that was working perfectly**.
-
-Reproduced directly:
+Against a **real model** it is not an edge case. Every region needs ~500 ms
+before it emits its first token, so at a 200 ms read timeout the serviceable
+request size is **zero** — the table below says `0 tokens` for all three.
+End to end, with the regions pointed at Ollama:
 
 ```
-$ docker stop us-east-1-endpoint eu-west-1-endpoint
-
-$ curl -si localhost:8000/v1/infer -d '{"prompt":"hi","max_tokens":8}'
-HTTP/1.1 200 OK
-x-failover-path: us-east-1:connect_error(15.7ms),eu-west-1:connect_error(4.0ms),ap-southeast-1:ok(183.4ms)
-
-$ curl -si localhost:8000/v1/infer -d '{"prompt":"hi","max_tokens":512}'
+$ curl -si localhost:8000/v1/infer -d '{"prompt":"Name three colours.","max_tokens":32}'
 HTTP/1.1 503 Service Unavailable
-x-failover-path: us-east-1:connect_error(7.7ms),eu-west-1:connect_error(6.3ms),ap-southeast-1:read_timeout(201.8ms)
+x-served-by-region: none
+x-failover-path: us-east-1:read_timeout(219.7ms),eu-west-1:read_timeout(208.5ms),ap-southeast-1:read_timeout(205.8ms)
 ```
 
-This was invisible before latency scaled with tokens, because every request cost
-the same. It is **not** a bug in the demo profile — 200 ms is the brief's number
-and is frozen ([CONTRACT §2](CONTRACT.md)) — but it is a real property of that
-number, and the production profile's larger timeout does not have it. See
-[ADR-028](DECISIONS.md#adr-028).
+Every region healthy. Every region timed out. **The brief's 200 ms cannot serve
+a single real request**, and no measurement of the mock could have said so,
+because the mock was configured to be fast.
+
+This is not a bug in the demo profile — 200 ms is the brief's number and is
+frozen ([CONTRACT §2](CONTRACT.md)) — and the mock it runs against genuinely
+answers inside it. It is a statement about what that number means the moment
+anything real is behind it. See [ADR-028](DECISIONS.md#adr-028).
+
+For reference, the production profile's `30000` ms comfortably covers the
+measured requirement of 7929 ms — so the guess was conservative rather than
+wrong. What changed is that something now justifies it, and `make
+calibrate-check` fails if it ever stops being true.
 
 ## Measured
 
 <!-- AUTOGEN:BEGIN:calibration-env -->
 | what was measured | value |
 |---|---|
-| backend | `mock` |
-| model(s) | `mock-echo-1` |
-| samples per step | 20 |
+| backend | `upstream` |
+| model(s) | `qwen2.5:0.5b` |
+| samples per step | 10 |
 | token steps | 8, 32, 128, 512 |
 
 <!-- AUTOGEN:END -->
@@ -101,9 +119,9 @@ number, and the production profile's larger timeout does not have it. See
 <!-- AUTOGEN:BEGIN:calibration-table -->
 | region | TTFT | ms/token | p99 @ 8 | p99 @ 32 | p99 @ 128 | p99 @ 512 |
 |---|---|---|---|---|---|---|
-| us-east-1 | 24.7 ms | 0.253 | 31.5 ms | 48.3 ms | 62.2 ms | 160.0 ms |
-| eu-west-1 | 72.4 ms | 0.246 | 79.7 ms | 88.0 ms | 114.2 ms | 207.8 ms |
-| ap-southeast-1 | 169.3 ms | 0.251 | 182.9 ms | 191.5 ms | 212.3 ms | 303.2 ms |
+| us-east-1 | 534.2 ms | 0.759 | 218.5 ms | 501.4 ms | 1602.2 ms | 3936.0 ms |
+| eu-west-1 | 457.3 ms | 1.036 | 381.4 ms | 567.1 ms | 1504.7 ms | 1627.0 ms |
+| ap-southeast-1 | 461.6 ms | 2.224 | 236.9 ms | 555.9 ms | 1942.4 ms | 3964.2 ms |
 <!-- AUTOGEN:END -->
 
 ### Capability ceiling at the shipped read timeout
@@ -113,21 +131,21 @@ At `read_timeout_ms=200`, against an API that accepts up to `max_tokens=512`:
 
 | region | largest serviceable request | verdict |
 |---|---|---|
-| us-east-1 | 512 | serves the full range |
-| eu-west-1 | 512 | serves the full range |
-| ap-southeast-1 | 122 | **503s above 122 tokens** |
+| us-east-1 | 0 | **503s above 0 tokens** |
+| eu-west-1 | 0 | **503s above 0 tokens** |
+| ap-southeast-1 | 0 | **503s above 0 tokens** |
 <!-- AUTOGEN:END -->
 
 ### Derived settings
 
 <!-- AUTOGEN:BEGIN:calibration-derived -->
-Worst p99 across all regions and token counts: **303.22 ms**. Streaming inter-chunk gap p99: **7.99 ms**.
+Worst p99 across all regions and token counts: **3964.2 ms**. Streaming inter-chunk gap p99: **22.23 ms** over 309 chunks.
 
 At 2.0x headroom:
 
 ```
-MRFP_READ_TIMEOUT_MS              = 607
-MRFP_TOTAL_BUDGET_MS              = 1414
+MRFP_READ_TIMEOUT_MS              = 7929
+MRFP_TOTAL_BUDGET_MS              = 16058
 MRFP_STREAM_INTER_CHUNK_TIMEOUT_S = 1.0
 ```
 <!-- AUTOGEN:END -->

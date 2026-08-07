@@ -768,6 +768,27 @@ exists.
 request whose honest service time exceeds it can never be served by that region, however healthy it
 is.
 
+**Then it was run against a real model** (`qwen2.5:0.5b` via Ollama) and the edge case turned out to
+be the general case. Every region needs ~500 ms before its first token, so at 200 ms the serviceable
+request size is **zero**:
+
+```
+x-failover-path: us-east-1:read_timeout(219.7ms),eu-west-1:read_timeout(208.5ms),ap-southeast-1:read_timeout(205.8ms)
+```
+
+Every region healthy; every region timed out; 503. No measurement of the mock could have said so,
+because the mock was configured to be fast. For the record the prod profile's 30000 ms comfortably
+covers the measured 7929 ms requirement — the guess was conservative, not wrong. What changed is that
+something now justifies it.
+
+**And the tool caught itself.** The first real run reported
+`MRFP_STREAM_INTER_CHUNK_TIMEOUT_S = 1.0` derived from **zero** stream samples: the passthrough did
+not implement `stream: true`, silently returning buffered JSON to a client that asked for SSE, and
+the derivation applied its 1 s floor to an empty list. A confident number with no measurement behind
+it, produced by the tool built to eliminate exactly that. Both were fixed — the passthrough now
+streams in our own frame format, and an unmeasured requirement is reported as unmeasured and cannot
+gate anything.
+
 At the brief's 200 ms, ap-southeast-1 serves at most ~122–132 tokens. Reproduced end to end: with the
 two faster regions stopped, `max_tokens=8` returns 200 from ap-southeast-1 in 183 ms, and
 `max_tokens=512` returns **503** — `read_timeout(201.8ms)` against a region that was working

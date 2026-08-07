@@ -18,6 +18,8 @@ deployment-specific edge in the real topology this models.
 
 from __future__ import annotations
 
+import json
+
 import httpx
 
 from app.settings import settings
@@ -51,6 +53,61 @@ async def aclose() -> None:
 
 class UpstreamError(RuntimeError):
     """The real endpoint failed. Surfaced as a 502 so the proxy fails over."""
+
+
+async def stream_complete(prompt: str, max_tokens: int, seed: int | None):
+    """Forward a real upstream's SSE, translated into OUR frame format.
+
+    WHY TRANSLATE rather than pass the upstream's bytes through: CONTRACT §3
+    owns the streaming wire format, and it must not change depending on which
+    backend happens to be behind a region. A client cannot be expected to parse
+    one shape from the mock and another from a real model.
+
+    WHY THIS EXISTS AT ALL: the first version of the passthrough returned
+    `_infer_upstream` before the `body.stream` branch was ever consulted, so a
+    streaming request against a real upstream silently got a buffered JSON
+    response — a 200 with `content-length`, no error, wrong content type. It
+    surfaced because `make calibrate` recorded ZERO stream chunks and then
+    derived an inter-chunk timeout from them anyway.
+    """
+    payload: dict[str, object] = {
+        "model": settings.upstream_model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+        "stream": True,
+    }
+    if seed is not None:
+        payload["seed"] = seed
+
+    index = 0
+    try:
+        async with get_client().stream("POST", "/v1/chat/completions", json=payload) as response:
+            if response.status_code >= 400:
+                raise UpstreamError(f"upstream returned {response.status_code}")
+            async for line in response.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                    token = chunk["choices"][0]["delta"].get("content")
+                except (ValueError, KeyError, IndexError, TypeError):
+                    # A frame we cannot read is not a reason to kill a stream
+                    # that is otherwise flowing.
+                    continue
+                if not token:
+                    continue
+                yield f"data: {json.dumps({'token': token, 'index': index})}\n\n".encode()
+                index += 1
+    except httpx.HTTPError as exc:
+        # RAISE, never return: returning would emit a well-formed short body,
+        # telling the client it received a complete answer. Same reason the mock
+        # raises for `truncate`.
+        raise UpstreamError(f"{type(exc).__qualname__}: {exc}") from exc
+
+    yield b"data: [DONE]\n\n"
 
 
 async def complete(prompt: str, max_tokens: int, seed: int | None) -> tuple[str, dict]:

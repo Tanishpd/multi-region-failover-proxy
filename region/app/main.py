@@ -100,6 +100,16 @@ async def infer(body: InferRequest, response: Response):
     started = time.perf_counter()
 
     if settings.upstream_enabled:
+        # The stream branch must come FIRST. Falling through to the buffered
+        # path returned a 200 with content-length to a client that asked for
+        # SSE — no error, wrong content type, and `make calibrate` silently
+        # measured zero chunks.
+        if body.stream:
+            return StreamingResponse(
+                upstream.stream_complete(body.prompt, body.max_tokens, body.seed),
+                media_type="text/event-stream",
+                headers={**_region_headers(), "x-stream": "1", "x-accel-buffering": "no"},
+            )
         return await _infer_upstream(body, response, started)
 
     await _simulate_latency(body.max_tokens)
@@ -184,7 +194,11 @@ async def metadata() -> dict[str, object]:
     return {
         "region": settings.region_id,
         "zone": settings.region_zone,
-        "model": settings.model_name,
+        # The model that will actually answer. Reporting `model_name` here while
+        # passthrough is on would stamp a REAL measurement with the mock's name
+        # in the calibration report — the precise mislabelling the `backend`
+        # field exists to prevent.
+        "model": settings.upstream_model if settings.upstream_enabled else settings.model_name,
         "base_latency_ms": settings.base_latency_ms,
         "jitter_ms": settings.jitter_ms,
         "per_token_ms": settings.per_token_ms,

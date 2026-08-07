@@ -239,3 +239,54 @@ def test_upstream_failure_is_502_not_the_injected_503() -> None:
     """Conflating 'the real model failed' with 'I was told to fail' would make a
     calibration run against a flaky provider look like an injected fault."""
     assert "status_code=502" in REGION_MAIN
+
+
+def test_the_real_upstream_is_reachable_from_every_region_service() -> None:
+    """Fourth application of the same lesson.
+
+    MRFP_STREAMING_ENABLED, MRFP_IDEMPOTENCY_ENABLED and MRFP_REDIS_SENTINELS
+    were each implemented, tested, and unreachable because compose never
+    forwarded them. These must be set PER SERVICE: a per-service
+    `environment:` block replaces the x-region-common anchor's entirely, so
+    putting them in the anchor would silently reach none of the three.
+    """
+    raw = (ROOT / "docker-compose.yml").read_text()
+    for var in ("MRFP_UPSTREAM_BASE_URL", "MRFP_UPSTREAM_MODEL", "MRFP_UPSTREAM_API_KEY"):
+        assert raw.count(var) >= 3, f"{var} does not reach all three region services"
+
+
+def test_the_metadata_model_names_whatever_will_actually_answer() -> None:
+    """`make calibrate` stamps this into the report. Reporting the mock's name
+    while passthrough is on would label a REAL measurement as a mock one, which
+    is the exact mislabelling the `backend` field exists to prevent."""
+    assert (
+        '"model": settings.upstream_model if settings.upstream_enabled else settings.model_name'
+        in REGION_MAIN
+    )
+
+
+def test_the_upstream_path_honours_stream_true() -> None:
+    """It did not, and the failure was silent: a client asking for SSE got a
+    200 with content-length and buffered JSON. Caught only because calibration
+    recorded zero chunks — and then derived a timeout from them anyway."""
+    start = REGION_MAIN.index("if settings.upstream_enabled:")
+    section = REGION_MAIN[start : start + 700]
+    assert "if body.stream:" in section
+    assert section.index("if body.stream:") < section.index("_infer_upstream("), (
+        "the buffered return must not precede the stream branch"
+    )
+
+
+def test_upstream_streaming_uses_OUR_frame_format() -> None:
+    """CONTRACT §3 owns the wire format; it must not change with the backend."""
+    up = (ROOT / "region" / "app" / "upstream.py").read_text()
+    assert "'token': token, 'index': index" in up
+    assert 'yield b"data: [DONE]\\n\\n"' in up
+
+
+def test_a_dying_upstream_stream_raises_rather_than_returning() -> None:
+    """Returning would emit a well-formed short body — telling the client it
+    received a complete answer. Same reason the mock raises for `truncate`."""
+    up = (ROOT / "region" / "app" / "upstream.py").read_text()
+    tail = up[up.index("async def stream_complete") :]
+    assert "raise UpstreamError" in tail[: tail.index("async def complete")]
