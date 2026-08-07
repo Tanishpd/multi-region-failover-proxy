@@ -15,14 +15,19 @@
 # Everything here reuses redis:7.2-alpine, so the whole topology costs no
 # additional image pull.
 #
-# RUN IT ALONE. Do not leave this up during `make chaos`. Three sentinels poll
-# continuously, and on this machine that background load was enough to push two
-# failover attempts past the 200 ms read timeout: a chaos run with the topology
-# up reported 5 x 503 (`attempt_deadline` on both secondaries) and A2 failed.
-# The same run with it torn down was 11/11 with zero errors. The chaos matrix
-# measures a 200 ms threshold, which makes it sensitive to anything else
-# competing for CPU — that sensitivity is the reason this is a separate file
-# and not part of the default stack.
+# LET THE HOST SETTLE BEFORE `make chaos` — and note what this is NOT.
+#
+# One chaos run failed A2 here with 5 x 503 (`attempt_deadline` on both
+# secondaries). I blamed these three sentinels polling, wrote that down, and was
+# wrong: `make redis-ha-down` had silently done nothing that run, so the topology
+# was ALSO up for the passing run a minute later. Retested deliberately with all
+# five containers up — 11/11, zero errors, `docker stop` in 487 ms.
+#
+# The real signal was in A11 all along: `docker stop` took 1265 ms in the failing
+# run against ~500-600 ms in every passing one. The daemon was still busy from
+# the two-image `make build` and full container recreate immediately before it.
+# Give the stack a few seconds after a rebuild; if A11 reports a stop much above
+# ~600 ms, the host is still settling and the run is not measuring the proxy.
 
 name: mrfp-redis-ha
 

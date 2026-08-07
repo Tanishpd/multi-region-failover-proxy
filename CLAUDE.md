@@ -58,7 +58,7 @@ the bug.
 | `chaos/flood.py` | Open-loop request pacer. |
 | `chaos/calibrate.py` | Derives the timeouts from measurement. Gate, not report. |
 | `ops/scripts/redis-ha-drill.sh` | Kills the current Redis primary and times recovery. |
-| `deploy/compose.redis-ha.yml` | Sentinel topology. Run it ALONE, never during `make chaos`. |
+| `deploy/compose.redis-ha.yml` | Sentinel topology: primary + replica + 3 sentinels. |
 | `ops/scripts/doctor.sh` | Preflight. Run this when anything is confusing. |
 | `config/regions.yaml` | The region registry — the only place regions are defined. |
 
@@ -134,6 +134,12 @@ These are real traps on *this* machine and in *these* libraries. Each one has co
 session.
 
 **Environment**
+
+- `make chaos` measures a 200 ms threshold, so a host still busy from `make build` and a full
+  container recreate can fail A2 with `attempt_deadline` on the secondaries. **A11 is the tell**:
+  `docker stop` takes ~500-600 ms on a settled host and 1265 ms on a busy one. Do not diagnose the
+  proxy from a run whose A11 is high — and do not blame whatever else happens to be running without
+  testing it, which is how a wrong co-tenancy claim got into these docs once already.
 
 - `make` here is **GNU Make 3.81** (macOS system make). `.SHELLFLAGS` arrived in 3.82 and is
   **silently ignored** — a failing pipeline exits 0 and `make chaos` reports success on a failed run.
@@ -226,8 +232,6 @@ session.
 - The single-`EVALSHA` atomicity of the token bucket.
 - The proxy healthcheck's independence from region health.
 - `MRFP_MODE` defaulting to `literal`.
-- Running `deploy/compose.redis-ha.yml` alongside `make chaos`. Three sentinels polling was enough
-  background load to push two failover attempts past the 200 ms read timeout and fail A2.
 - Adding an **active health poller**. It would detect an outage before any data-plane request
   failed, so the brief's `except` block would never fire. This was considered and deliberately cut.
 
