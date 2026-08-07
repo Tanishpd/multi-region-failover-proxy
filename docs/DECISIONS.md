@@ -805,6 +805,15 @@ Worth recording: the first attempt at that proxy refused to boot —
 `MRFP_TOTAL_BUDGET_MS=20000 is below 3 x (connect 1000 + read 8000) = 27000ms`. The budget validator
 caught a misconfiguration I had just written by hand, which is exactly the case it exists for.
 
+**The guess turned out to be right, and now it is checked.** Re-run against a 3B-class model
+(`llama3.2:3b`: TTFT ~600-690 ms, 18-23 ms/token, p99@512 of 12.7-14.9 s), the derived requirement is
+`MRFP_READ_TIMEOUT_MS=29734` and `MRFP_TOTAL_BUDGET_MS=59668` — against the shipped guesses of 30000
+and 64000. Within 1%.
+
+The numbers did not move; they stopped being assertions. Note also how far they travel: a 0.5B model
+wanted ~8 s and a 3B model wants ~30 s, so model size moved the requirement 4x. That is precisely why
+this is a command and not a constant.
+
 **And the tool caught itself.** The first real run reported
 `MRFP_STREAM_INTER_CHUNK_TIMEOUT_S = 1.0` derived from **zero** stream samples: the passthrough did
 not implement `stream: true`, silently returning buffered JSON to a client that asked for SSE, and

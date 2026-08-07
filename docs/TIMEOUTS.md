@@ -37,14 +37,14 @@ timeout is below what was measured.
 
 It measures whatever is behind the regions, and it labels what that was. The run
 below says `backend: upstream`, so these numbers came from a real model —
-`qwen2.5:0.5b` served by a local Ollama. Reproduce with any OpenAI-compatible
+`llama3.2:3b` served by a local Ollama. Reproduce with any OpenAI-compatible
 endpoint:
 
 ```
-ollama pull qwen2.5:0.5b        # or point at any OpenAI-compatible API
+ollama pull llama3.2:3b         # or point at any OpenAI-compatible API
 MRFP_UPSTREAM_BASE_URL=http://host.docker.internal:11434 \
-MRFP_UPSTREAM_MODEL=qwen2.5:0.5b \
-  docker compose up -d && make calibrate
+MRFP_UPSTREAM_MODEL=llama3.2:3b \
+  docker compose up -d && bash ops/scripts/calibrate.sh --samples 4 --yes
 ```
 
 **Against a paid or shared endpoint it will refuse until you confirm.** A default
@@ -69,10 +69,12 @@ samples the reported p99 is simply the observed maximum.
 1. **A small model on a laptop is not your production fleet.** Re-run this
    against the hardware you deploy on; that is the entire point of it being a
    command rather than a constant.
-2. **Run-to-run variance is large.** Two consecutive runs against the same model
-   derived 15313 ms and 7929 ms — a 1.9x spread, from nothing but contention on
-   a shared machine. This is *why* the headroom multiple exists, and why a single
-   run is a starting point rather than an answer.
+2. **Run-to-run variance is large.** Two consecutive runs against the same
+   smaller model (`qwen2.5:0.5b`) derived 15313 ms and 7929 ms — a 1.9x spread,
+   from nothing but contention on a shared machine. This is *why* the headroom
+   multiple exists, and why a single run is a starting point rather than an
+   answer. The run below used `--samples 4`, at which the reported "p99" is
+   simply the observed maximum.
 3. **The per-region rows are one backend measured three times.** All three
    regions proxy to the same Ollama instance, so the spread in `ms/token`
    (0.759 / 1.036 / 2.224) is measurement noise, not geography. Against genuinely
@@ -114,19 +116,38 @@ frozen ([CONTRACT §2](CONTRACT.md)) — and the mock it runs against genuinely
 answers inside it. It is a statement about what that number means the moment
 anything real is behind it. See [ADR-028](DECISIONS.md#adr-028).
 
-For reference, the production profile's `30000` ms comfortably covers the
-measured requirement of 7929 ms — so the guess was conservative rather than
-wrong. What changed is that something now justifies it, and `make
-calibrate-check` fails if it ever stops being true.
+### The guess, checked
+
+The production profile shipped `MRFP_READ_TIMEOUT_MS=30000` and
+`MRFP_TOTAL_BUDGET_MS=64000`, and I said plainly that nobody had measured
+anything to arrive at them.
+
+Measured against `llama3.2:3b` — TTFT ~600-690 ms, ~18-23 ms per token, p99 of a
+512-token request 12.7-14.9 s — the derived requirement is:
+
+| setting | shipped guess | derived from measurement |
+|---|---|---|
+| `MRFP_READ_TIMEOUT_MS` | 30000 | **29734** |
+| `MRFP_TOTAL_BUDGET_MS` | 64000 | **59668** |
+
+The guess was **right**, within 1%. That is a genuinely good outcome and it is
+worth being precise about what changed: the numbers did not move, but they
+stopped being assertions. `make calibrate-check` now fails if either drifts
+below what the backend needs, and re-deriving against your own hardware is one
+command.
+
+It also shows how far these numbers travel. A 0.5B model wanted ~8 s; a 3B model
+wants ~30 s. Model size moved the requirement by 4x, which is exactly why this
+is a command and not a constant.
 
 ## Measured
 
 <!-- AUTOGEN:BEGIN:calibration-env -->
 | what was measured | value |
 |---|---|
-| backend | `mock` |
-| model(s) | `mock-echo-1` |
-| samples per step | 20 |
+| backend | `upstream` |
+| model(s) | `llama3.2:3b` |
+| samples per step | 4 |
 | token steps | 8, 32, 128, 512 |
 
 <!-- AUTOGEN:END -->
@@ -136,9 +157,9 @@ calibrate-check` fails if it ever stops being true.
 <!-- AUTOGEN:BEGIN:calibration-table -->
 | region | TTFT | ms/token | p99 @ 8 | p99 @ 32 | p99 @ 128 | p99 @ 512 |
 |---|---|---|---|---|---|---|
-| us-east-1 | 23.6 ms | 0.257 | 30.4 ms | 36.4 ms | 62.1 ms | 170.4 ms |
-| eu-west-1 | 72.9 ms | 0.248 | 81.5 ms | 89.2 ms | 115.8 ms | 208.2 ms |
-| ap-southeast-1 | 165.9 ms | 0.261 | 179.7 ms | 186.1 ms | 212.2 ms | 312.0 ms |
+| us-east-1 | 686.3 ms | 17.724 | 455.3 ms | 1226.0 ms | 3885.6 ms | 14866.5 ms |
+| eu-west-1 | 577.9 ms | 23.319 | 389.5 ms | 1281.5 ms | 4382.9 ms | 13970.8 ms |
+| ap-southeast-1 | 690.6 ms | 19.728 | 519.1 ms | 1094.5 ms | 4884.1 ms | 12727.2 ms |
 <!-- AUTOGEN:END -->
 
 ### Capability ceiling at the shipped read timeout
@@ -148,21 +169,21 @@ At `read_timeout_ms=200`, against an API that accepts up to `max_tokens=512`:
 
 | region | largest serviceable request | verdict |
 |---|---|---|
-| us-east-1 | 512 | serves the full range |
-| eu-west-1 | 511 | **503s above 511 tokens** |
-| ap-southeast-1 | 130 | **503s above 130 tokens** |
+| us-east-1 | 0 | **503s above 0 tokens** |
+| eu-west-1 | 0 | **503s above 0 tokens** |
+| ap-southeast-1 | 0 | **503s above 0 tokens** |
 <!-- AUTOGEN:END -->
 
 ### Derived settings
 
 <!-- AUTOGEN:BEGIN:calibration-derived -->
-Worst p99 across all regions and token counts: **312.03 ms**. Streaming inter-chunk gap p99: **13.82 ms** over 384 chunks.
+Worst p99 across all regions and token counts: **14866.55 ms**. Streaming inter-chunk gap p99: **41.25 ms** over 384 chunks.
 
 At 2.0x headroom:
 
 ```
-MRFP_READ_TIMEOUT_MS              = 625
-MRFP_TOTAL_BUDGET_MS              = 1450
+MRFP_READ_TIMEOUT_MS              = 29734
+MRFP_TOTAL_BUDGET_MS              = 59668
 MRFP_STREAM_INTER_CHUNK_TIMEOUT_S = 1.0
 ```
 <!-- AUTOGEN:END -->
