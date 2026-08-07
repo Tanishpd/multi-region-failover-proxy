@@ -94,11 +94,11 @@ docs-check:
 # --- chaos ------------------------------------------------------------------
 
 chaos:
-	@bash ops/scripts/_todo.sh 3 "make chaos"
+	@bash ops/scripts/chaos.sh stop-us-east
 
 # One named scenario, e.g. `make chaos-pause-us-east`.
 chaos-%:
-	@bash ops/scripts/_todo.sh 3 "make chaos-$*"
+	@bash ops/scripts/chaos.sh "$*"
 
 report:
 	@bash ops/scripts/_todo.sh 8 "make report"

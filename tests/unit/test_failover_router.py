@@ -86,9 +86,7 @@ async def test_prefers_us_east_when_healthy() -> None:
 
 async def test_falls_back_on_connect_error() -> None:
     """`docker stop`: DNS withdrawn, fast fail. Measured at 2-9 ms live."""
-    router = build_router(
-        {"us-east-1": httpx.ConnectError("[Errno -2] Name or service not known")}
-    )
+    router = build_router({"us-east-1": httpx.ConnectError("[Errno -2] Name or service not known")})
     result = await router.route(make_request())
     assert result.status == 200
     assert result.region == "eu-west-1"
