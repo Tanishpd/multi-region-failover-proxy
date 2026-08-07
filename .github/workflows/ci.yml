@@ -102,11 +102,17 @@ jobs:
           sbom: true
           provenance: mode=max
       - name: vulnerability gate
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          image-ref: ghcr.io/${{ github.repository }}/proxy:${{ github.sha }}
-          severity: HIGH,CRITICAL
-          # You cannot act on a CVE with no patch; those are surfaced by the
-          # weekly re-scan as an issue rather than blocking a deploy.
-          ignore-unfixed: true
-          exit-code: "1"
+        # The scanner runs as a PINNED CONTAINER rather than a marketplace
+        # action. Two reasons: the action version is one more unverifiable
+        # dependency in a job whose whole purpose is supply-chain assurance
+        # (and the first version I pinned did not exist, which failed the job),
+        # and a container tag is something you can pull and check.
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:0.58.1 image \
+              --severity HIGH,CRITICAL \
+              --ignore-unfixed \
+              --exit-code 1 \
+              --format table \
+              ghcr.io/${{ github.repository }}/proxy:${{ github.sha }}
