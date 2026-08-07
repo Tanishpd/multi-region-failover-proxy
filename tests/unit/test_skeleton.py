@@ -60,9 +60,7 @@ def test_no_makefile_recipe_contains_a_pipeline() -> None:
     ops/scripts/*.sh, which carry their own `set -euo pipefail`. (ADR-016)
     """
     offenders = []
-    for lineno, line in enumerate(
-        (ROOT / "Makefile").read_text().splitlines(), start=1
-    ):
+    for lineno, line in enumerate((ROOT / "Makefile").read_text().splitlines(), start=1):
         if not line.startswith("\t"):
             continue
         recipe = line.lstrip("\t").lstrip("@-")
@@ -74,19 +72,36 @@ def test_no_makefile_recipe_contains_a_pipeline() -> None:
 
 
 def test_ops_scripts_are_strict() -> None:
-    """Every script carries its own strict mode, since the Makefile cannot."""
+    """Every executable script carries its own strict mode, since Make cannot.
+
+    Sourced libraries are exempt: they run inside a caller that has already set
+    it, and `set -e` in a sourced file leaks into that caller's shell. They must
+    say so explicitly, so the exemption is a decision rather than an oversight.
+    """
     for script in sorted((ROOT / "ops" / "scripts").glob("*.sh")):
         text = script.read_text()
+        if "Source, don't execute" in text or "source, don't execute" in text:
+            continue
         assert "set -euo pipefail" in text, f"{script.name} lacks `set -euo pipefail`"
 
 
 def test_no_executable_code_calls_flushall() -> None:
     """A real Redis with real data sits one port away, so nothing may flush it.
 
-    Scoped to code and scripts: prose is free to *forbid* the command by name,
-    which is why the docs mention it. docs/CONTRACT.md section 10.
+    Matches *invocations*, not mentions: prose and help text are free to name
+    the command in order to forbid it, which is exactly what they do.
+    docs/CONTRACT.md section 10.
     """
     executable_suffixes = {".py", ".sh", ".lua", ".yml", ".yaml", ".toml"}
+    # A call through redis-py, a redis-cli argument, or a raw command string.
+    invocation = re.compile(
+        r"""(?ix)
+        \. \s* flushall \s* \(          # client.flushall()
+        | redis-cli [^\n]* \b flushall \b   # redis-cli ... flushall
+        | ["'] \s* flushall \s* ["']    # execute_command("FLUSHALL")
+        """
+    )
+
     tracked = subprocess.run(
         ["git", "ls-files"], cwd=ROOT, capture_output=True, text=True, check=True
     ).stdout.split()
@@ -98,7 +113,7 @@ def test_no_executable_code_calls_flushall() -> None:
             continue
         if path.suffix not in executable_suffixes and path.name != "Makefile":
             continue
-        # This test names the command it forbids, so it must skip itself.
+        # This test spells out the patterns it forbids, so it must skip itself.
         if path.resolve() == Path(__file__).resolve():
             continue
         try:
@@ -106,10 +121,10 @@ def test_no_executable_code_calls_flushall() -> None:
         except UnicodeDecodeError:
             continue
         for lineno, line in enumerate(content.splitlines(), start=1):
-            if "flushall" in line.lower():
-                offenders.append(f"{name}:{lineno}")
+            if invocation.search(line):
+                offenders.append(f"{name}:{lineno}: {line.strip()}")
 
-    assert not offenders, f"FLUSHALL invoked in: {offenders}"
+    assert not offenders, "FLUSHALL invoked in:\n" + "\n".join(offenders)
 
 
 def test_env_example_has_no_default_redis_url_in_code_path() -> None:

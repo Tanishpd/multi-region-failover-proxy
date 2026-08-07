@@ -1,0 +1,124 @@
+# The stack. No `version:` key — it has been obsolete since Compose v2.
+#
+# The project directory is "Multi-Region Model Deployment & Failover Proxy":
+# spaces and an "&". Compose derives its project name from the directory, which
+# would produce something mangled and shell-hostile, so it is pinned here.
+# (ADR-002)
+name: mrfp
+
+# Shared region configuration.
+#
+# Note what is NOT here: `environment:`. YAML anchors shallow-merge, so a
+# per-service `environment:` block would replace the anchor's map wholesale and
+# silently drop every shared key. Shared env lives in region/region.env via
+# env_file, which Compose merges per-key.
+x-region: &region
+  build:
+    context: ./region
+  image: mrfp/region:dev
+  env_file:
+    - ./region/region.env
+  networks: [mrfp-net]
+  # A restart policy would resurrect a region that CRASHES mid-run, and
+  # `always` revives stopped containers when the daemon restarts — either
+  # invalidates the chaos timeline. (Policies do not fire after a manual
+  # `docker stop`, so the chaos stop itself is safe regardless.) (ADR-011)
+  restart: "no"
+  # 2s, not 0s: a 0s grace period makes `docker stop` behave like `docker kill`,
+  # which changes which exception the client sees. The region's uvicorn already
+  # sets --timeout-graceful-shutdown 0 so it exits promptly within this window.
+  stop_grace_period: 2s
+  mem_limit: 256m
+
+services:
+  # --- the three regions ----------------------------------------------------
+  # container_name is pinned because the brief specifies
+  # `docker stop us-east-1-endpoint` literally and the chaos harness runs
+  # exactly that. Compose's generated names would break it. (ADR-003)
+
+  us-east-1-endpoint:
+    <<: *region
+    container_name: us-east-1-endpoint
+    environment:
+      MRFP_REGION_ID: us-east-1
+      MRFP_REGION_ZONE: us-east-1a
+      MRFP_BASE_LATENCY_MS: "15"
+      MRFP_JITTER_MS: "5"
+    ports:
+      - "127.0.0.1:9001:8080"
+
+  eu-west-1-endpoint:
+    <<: *region
+    container_name: eu-west-1-endpoint
+    environment:
+      MRFP_REGION_ID: eu-west-1
+      MRFP_REGION_ZONE: eu-west-1b
+      MRFP_BASE_LATENCY_MS: "60"
+      MRFP_JITTER_MS: "10"
+    ports:
+      - "127.0.0.1:9002:8080"
+
+  ap-southeast-1-endpoint:
+    <<: *region
+    container_name: ap-southeast-1-endpoint
+    environment:
+      MRFP_REGION_ID: ap-southeast-1
+      MRFP_REGION_ZONE: ap-southeast-1c
+      MRFP_BASE_LATENCY_MS: "150"
+      MRFP_JITTER_MS: "20"
+    ports:
+      - "127.0.0.1:9003:8080"
+
+  # --- redis ----------------------------------------------------------------
+  # Named bare `redis` so `docker stop redis` works verbatim, in the same style
+  # as the brief's own `docker stop us-east-1-endpoint`. (ADR-003)
+  redis:
+    image: redis:7.2-alpine
+    container_name: redis
+    networks: [mrfp-net]
+    restart: "no"
+    # 6380 on the host: a native redis-server already owns 6379 on this machine
+    # and it has real data in it. In-network addressing stays redis:6379.
+    # (ADR-004)
+    ports:
+      - "127.0.0.1:6380:6379"
+    # Cache-only. Every key has a TTL, both consumers fail open, and the
+    # proxy-restart chaos drill wants a fast restart with a guaranteed-empty
+    # script cache to exercise NOSCRIPT recovery. AOF would defeat that.
+    # (ADR-014)
+    command: >
+      redis-server
+      --save ""
+      --appendonly no
+      --maxmemory 256mb
+      --maxmemory-policy volatile-ttl
+    healthcheck:
+      # The redis image, unlike python:*-slim, does ship redis-cli.
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 2s
+      retries: 5
+      start_period: 2s
+    mem_limit: 320m
+
+  # The sentinel key the pytest fixture demands before it will delete anything
+  # in db 15. Its absence means "this is not our Redis" regardless of the db
+  # index, which is what protects the developer's own instance on 6379.
+  # docs/CONTRACT.md section 10.
+  redis-sentinel-seed:
+    image: redis:7.2-alpine
+    container_name: mrfp-redis-seed
+    networks: [mrfp-net]
+    restart: "no"
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: >
+      redis-cli -h redis -p 6379 -n 15 SET mrfp:test-guard
+      "written by the mrfp stack; tests refuse to run without this"
+    mem_limit: 64m
+
+networks:
+  mrfp-net:
+    name: mrfp-net
+    driver: bridge

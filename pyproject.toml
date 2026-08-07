@@ -27,6 +27,11 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101"]
 
+[tool.ruff.lint.isort]
+# `app` is the package root inside both images (WORKDIR /app), so it is
+# first-party here even though it is not installed on the host.
+known-first-party = ["app"]
+
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]

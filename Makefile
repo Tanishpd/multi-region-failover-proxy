@@ -51,22 +51,22 @@ venv:
 # expire during it and report a false failure.
 
 build:
-	@bash ops/scripts/_todo.sh 1 "make build"
+	@bash ops/scripts/build.sh
 
 up:
-	@bash ops/scripts/_todo.sh 1 "make up"
+	@bash ops/scripts/up.sh all
 
 up-regions:
-	@bash ops/scripts/_todo.sh 1 "make up-regions"
+	@bash ops/scripts/up.sh regions
 
 down:
-	@bash ops/scripts/_todo.sh 1 "make down"
+	@bash ops/scripts/down.sh
 
 ps:
-	@bash ops/scripts/_todo.sh 1 "make ps"
+	@bash ops/scripts/ps.sh
 
 health:
-	@bash ops/scripts/_todo.sh 2 "make health"
+	@bash ops/scripts/health.sh
 
 logs:
 	@bash ops/scripts/_todo.sh 2 "make logs"
