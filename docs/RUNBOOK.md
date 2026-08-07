@@ -315,3 +315,34 @@ docker compose exec redis redis-cli -a "$MRFP_REDIS_PASSWORD" ping
 boot and refuses to start when it is refused. Seeing this alert means the
 credential broke *after* a successful start, so the fix is a redeploy with the
 current secret rather than a config edit.
+
+
+## Drill: a Redis restart under live traffic
+
+The NOSCRIPT path. After a restart or `SCRIPT FLUSH` the script cache is empty,
+so `EVALSHA` fails and every in-flight request discovers it at once. The
+generation counter in `ratelimit/scripts.py` exists so exactly ONE caller
+re-uploads while the rest retry the cheap `EVALSHA` — the naive alternatives
+being N concurrent full-body `EVAL`s or serialising every request behind one
+lock.
+
+```
+( sleep 8; docker restart redis ) &
+PROBE_URL=http://127.0.0.1:8000/v1/infer PROBE_RPS=10 PROBE_DURATION_S=25 \
+  .venv/bin/python ops/drills/proxy_probe.py
+curl -s localhost:8000/metrics | grep -E 'noscript_recoveries|backend_up'
+```
+
+Measured on this stack:
+
+| what | result |
+|---|---|
+| client-visible failures | **0 of 250** — fail-open held |
+| limiter modes | 246 `redis`, 4 `local` during the gap |
+| `rate_limit_noscript_recoveries_total` | 0 → **1** — one EVAL, not one per request |
+| `rate_limit_degraded` reason | `unreachable` (an outage, correctly not `auth`) |
+| `rate_limit_backend_up` | back to **1.0**, no restart needed |
+
+A run showing 0 recoveries means the restart never emptied the cache and the
+path was not exercised; a run showing one per request means the generation
+counter has regressed.
