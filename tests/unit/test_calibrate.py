@@ -214,3 +214,25 @@ def test_concurrency_is_recorded_in_the_report() -> None:
     body = (ROOT / "chaos" / "calibrate.py").read_text()
     assert '"concurrency": args.concurrency,' in body
     assert "| concurrency |" in body
+
+
+def test_a_pass_at_concurrency_1_against_a_live_backend_is_caveated() -> None:
+    """A PASS measured at concurrency 1 is a PASS for an IDLE backend.
+
+    Going from concurrency 1 to 4 moved the derived read timeout 3.3x on this
+    stack — comparable to the effect of model size. Reporting "every timeout is
+    fine" without that caveat is the check handing back false confidence, which
+    is the failure mode the whole tool exists to remove.
+    """
+    body = (ROOT / "chaos" / "calibrate.py").read_text()
+    assert "if live and args.concurrency == 1:" in body
+    assert "describes an idle backend" in body
+
+
+def test_the_prod_read_timeout_states_the_concurrency_it_assumes() -> None:
+    """30000 is right within 1% at concurrency 1 and 2.6x too small at 4. A
+    default that encodes an assumption has to name it, or the next reader
+    inherits a number with invisible conditions attached."""
+    body = (ROOT / "proxy" / "app" / "profiles.py").read_text()
+    assert "AT CONCURRENCY 1" in body
+    assert "make calibrate" in body

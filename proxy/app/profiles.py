@@ -41,6 +41,17 @@ _PRESETS: dict[str, dict[str, Any]] = {
         "mode": "resilient",
         # Real inference: seconds to first token, not milliseconds. The 200 ms
         # in the demo profile describes a mock region behind a sleep.
+        #
+        # 30s is NOT arbitrary and NOT universal. Measured against a 3B-class
+        # model it is right within 1% (`make calibrate` derived 29845) — but
+        # only AT CONCURRENCY 1. The same backend at concurrency 4 needed
+        # 80042, so this value is 2.6x too small for a contended endpoint.
+        #
+        # It is a starting point sized for a backend serving roughly one
+        # request at a time. Re-derive it for yours:
+        #     make calibrate  # or: calibrate.sh --concurrency N --yes
+        # and `make calibrate-check` will fail if this drifts below it.
+        # (ADR-028, docs/TIMEOUTS.md)
         "read_timeout_ms": 30_000,
         "connect_timeout_ms": 1_000,
         # Two attempts, not three: 3 x 31s is 93 seconds and every caller has

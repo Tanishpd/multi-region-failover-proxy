@@ -431,6 +431,21 @@ async def run(args: argparse.Namespace) -> int:
         print(f"FAIL: {problem}")
     if problems:
         return 1
+
+    # A pass measured at concurrency 1 against a live backend is a pass for an
+    # IDLE backend. Measured on this stack, going from concurrency 1 to 4 moved
+    # the requirement 3.3x — comparable to the effect of model size. Reporting
+    # "every timeout is fine" without that caveat is how the check would hand
+    # back false confidence.
+    if live and args.concurrency == 1:
+        print(
+            "\nWARNING: measured at --concurrency 1, which is SERVICE latency.\n"
+            "  A backend that queues imposes a much larger p99: on this stack "
+            "concurrency 4 moved\n  the derived read timeout 3.3x. This PASS "
+            "describes an idle backend.\n"
+            "  Re-run with --concurrency N at your expected peak before trusting it."
+        )
+
     print("PASS: every configured timeout is above its measured requirement.")
     return 0
 
