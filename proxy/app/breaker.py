@@ -69,6 +69,10 @@ class Breaker:
     cooldown_s: float = 5.0
     max_cooldown_s: float = 60.0
     on_open: Callable[[str], Awaitable[None]] | None = None
+    # Called on every LOCAL transition so it can be gossiped to other replicas.
+    # Not called for transitions applied FROM gossip, or replicas would echo
+    # each other forever.
+    on_transition: Callable[[str, str, str], None] | None = None
     clock: Callable[[], float] = time.monotonic
     # How long a half-open probe may stay outstanding before its token is
     # reclaimed. Must exceed the total request budget, or a legitimately slow
@@ -120,6 +124,17 @@ class Breaker:
         entry.probe_started_at = now
         return True, State.HALF_OPEN.value
 
+    def force_open(self, key: str, *, code: str = "remote") -> None:
+        """Open on another replica's evidence, without local failures.
+
+        Applies the VERDICT rather than the counters: replaying a remote
+        replica's failure count would double-count the same evidence.
+        """
+        entry = self._entry(key)
+        if entry.state is State.OPEN:
+            return
+        self._open(key, entry, code, gossip=False)
+
     def record_success(self, key: str) -> None:
         entry = self._entry(key)
         entry.consecutive_failures = 0
@@ -129,6 +144,8 @@ class Breaker:
             entry.cooldown_s = self.cooldown_s  # reset the backoff
             entry.transitions += 1
             logx("circuit_closed", region=key)
+            if self.on_transition is not None:
+                self.on_transition(key, "closed", "-")
 
     def record_failure(self, key: str, *, code: str = "-") -> None:
         entry = self._entry(key)
@@ -146,7 +163,7 @@ class Breaker:
         if entry.state is State.CLOSED and entry.consecutive_failures >= self.failure_threshold:
             self._open(key, entry, code)
 
-    def _open(self, key: str, entry: _Entry, code: str) -> None:
+    def _open(self, key: str, entry: _Entry, code: str, *, gossip: bool = True) -> None:
         entry.state = State.OPEN
         entry.opened_at = self.clock()
         entry.transitions += 1
@@ -158,6 +175,9 @@ class Breaker:
             failures=entry.consecutive_failures,
             cooldown_s=entry.cooldown_s,
         )
+
+        if gossip and self.on_transition is not None:
+            self.on_transition(key, "open", code)
 
         if self.on_open is None:
             return

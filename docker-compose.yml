@@ -61,6 +61,22 @@ services:
       # Off by default: the demo profile's behaviour must be unchanged by
       # streaming's presence, not merely equivalent to it.
       MRFP_STREAMING_ENABLED: "${MRFP_STREAMING_ENABLED:-0}"
+      # Every other prod-profile flag, defaulted to its DEMO value so an unset
+      # override changes nothing, and overridable so a production feature can be
+      # exercised against this stack without standing up a second one.
+      # (Empty-string defaults would fail pydantic coercion on bool/int fields.)
+      MRFP_AUTH_MODE: "${MRFP_AUTH_MODE:-off}"
+      MRFP_FAILOVER_ON_SHED: "${MRFP_FAILOVER_ON_SHED:-1}"
+      MRFP_GRACEFUL_SHUTDOWN_S: "${MRFP_GRACEFUL_SHUTDOWN_S:-5}"
+      MRFP_IDEMPOTENCY_ENABLED: "${MRFP_IDEMPOTENCY_ENABLED:-0}"
+      MRFP_LOG_CLIENT_IP: "${MRFP_LOG_CLIENT_IP:-raw}"
+      MRFP_LOG_SAMPLE_RATE: "${MRFP_LOG_SAMPLE_RATE:-1.0}"
+      MRFP_MAX_RESPONSE_BYTES: "${MRFP_MAX_RESPONSE_BYTES:-8388608}"
+      MRFP_METRICS_PUBLIC: "${MRFP_METRICS_PUBLIC:-1}"
+      MRFP_MIN_ATTEMPT_MS: "${MRFP_MIN_ATTEMPT_MS:-60}"
+      MRFP_REGION_ATTEMPT_LIMIT: "${MRFP_REGION_ATTEMPT_LIMIT:-3}"
+      MRFP_REPLAY_MAYBE_SENT: "${MRFP_REPLAY_MAYBE_SENT:-1}"
+      MRFP_REQUIRE_TLS: "${MRFP_REQUIRE_TLS:-0}"
       # LOOPBACK ONLY. This previously included 172.16.0.0/12 so that XFF would
       # be honoured for host traffic — but the Docker bridge gateway that every
       # external request arrives from lives in that range, which made every

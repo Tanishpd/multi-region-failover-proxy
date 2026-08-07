@@ -67,6 +67,8 @@ _PRESETS: dict[str, dict[str, Any]] = {
         "log_client_ip": "hashed",
         "graceful_shutdown_s": 30,
         "streaming_enabled": True,
+        "require_tls": True,
+        "idempotency_enabled": True,
     },
 }
 

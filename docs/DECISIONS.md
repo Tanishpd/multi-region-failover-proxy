@@ -617,3 +617,69 @@ Mid-stream resume — reconnecting to a second region and continuing from a toke
 considered and rejected. It only works because this mock's inference is `blake2b`-deterministic. A
 real model behind a different GPU, batch composition or sampler is not, so building it here would
 encode an assumption that dissolves the moment the mock is replaced. Commit is commit.
+
+---
+
+<a id="adr-025"></a>
+
+## ADR-025: Gossip breaker verdicts; do not put Redis in the failover path
+
+**Date:** 2026-08-07 · **Status:** accepted
+
+**Context.** Breakers are per-process ([ADR-008](#adr-008)). With N replicas, detecting a region
+outage costs N × threshold failures instead of threshold, and N replicas each fire their own
+half-open probe at a region that is trying to recover.
+
+The obvious fix — breaker state in Redis behind a Lua CAS — puts a network round trip in the hot
+path of the component whose entire job is surviving failures, and makes a Redis outage degrade
+failover itself. That is the wrong dependency direction.
+
+**Decision.** Gossip, not consensus. Each replica decides locally and publishes only state
+*transitions* to a Redis pub/sub channel; each replica applies transitions it hears. The hot path
+never touches Redis.
+
+The property that makes this safe to add: **when Redis is unavailable, every replica falls back to
+exactly the behaviour it had before gossip existed.** The degraded mode is the previously-correct
+mode.
+
+Two details matter. Remote messages apply the **verdict**, not the counters — replaying another
+replica's failure count would double-count the same evidence. And a transition applied *from* gossip
+is never re-announced, or two replicas echo each other indefinitely.
+
+**Consequence.** Verified against a real Redis with two breakers: replica-2 opened from replica-1's
+verdict with zero local failures, and closed again on recovery, with one publish and one apply.
+Eventual consistency is fine here — a breaker is a heuristic about a region's health, not a lock,
+and two replicas briefly disagreeing costs one extra probe.
+
+The fallback rate-limit bucket is divided by `MRFP_REPLICAS` for the same reason: with Redis down,
+N replicas would otherwise enforce N × the configured limit. Approximate, since traffic is not
+evenly balanced, but far closer than N×, and the exact answer requires the shared store that is by
+definition unavailable on that path.
+
+---
+
+<a id="adr-026"></a>
+
+## ADR-026: Refuse a duplicate; do not cache the response
+
+**Date:** 2026-08-07 · **Status:** accepted
+
+**Context.** `MAYBE_SENT` means the upstream may have processed the request and only the response
+was lost. Refusing to replay it without an `Idempotency-Key` protects a retry *inside* one request,
+but not the client retrying, a load balancer re-dispatching, or two replicas racing the same key.
+
+**Decision.** Claim the key in Redis with `SET NX` before the upstream call; mark it done afterwards.
+A duplicate that arrives while the first is in flight is **refused with 409**, not served.
+
+Deliberately NOT the Stripe-style design of caching and replaying the original response. That needs
+a size cap, a TTL policy, a memory budget, an unanswerable question for streaming responses, and it
+would turn [ADR-014](#adr-014)'s deliberately cache-only Redis into a durability dependency.
+Refusing removes the double charge, which is the entire production risk; returning the original body
+is a convenience layered on top.
+
+Fail-open on an unreachable Redis, matching the limiter: losing deduplication degrades a guarantee,
+while refusing all traffic because a cache is down is an outage.
+
+**Consequence.** A claim is *released* rather than marked done when the request never reached an
+upstream or returned 5xx — otherwise a correct client retry would be refused for the full 15-minute
+TTL. Verified live: first use of a key 200, replay 409, a different key 200, no key 200.

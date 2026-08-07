@@ -22,8 +22,18 @@ class _Bucket:
 
 @dataclass
 class LocalBucket:
+    """Per-process, so N replicas would enforce N x the limit unless divided.
+
+    `replicas` exists for exactly that: with Redis down and 3 replicas, each
+    enforces a third of the configured limit, so the fleet total stays close to
+    what was asked for. Approximate — traffic is not evenly balanced — but far
+    closer than 3x, and the alternative needs the shared store that is by
+    definition unavailable in this path.
+    """
+
     capacity: float
     refill_per_sec: float
+    replicas: int = 1
     _buckets: dict[str, _Bucket] = field(default_factory=dict)
 
     def consume(
@@ -31,21 +41,21 @@ class LocalBucket:
     ) -> tuple[bool, float, int]:
         """Returns (allowed, remaining, retry_after_ms). Same maths as the Lua."""
         now = now_ms if now_ms is not None else time.time() * 1000
+        share = max(1.0, self.capacity / max(1, self.replicas))
+        rate = self.refill_per_sec / max(1, self.replicas)
         bucket = self._buckets.get(key)
         if bucket is None:
-            bucket = _Bucket(tokens=self.capacity, updated_ms=now)
+            bucket = _Bucket(tokens=share, updated_ms=now)
             self._buckets[key] = bucket
 
         elapsed = max(0.0, now - bucket.updated_ms)  # a backwards clock never refunds
-        if self.refill_per_sec > 0 and elapsed > 0:
-            bucket.tokens = min(self.capacity, bucket.tokens + elapsed * self.refill_per_sec / 1000)
+        if rate > 0 and elapsed > 0:
+            bucket.tokens = min(share, bucket.tokens + elapsed * rate / 1000)
         bucket.updated_ms = now
 
         if bucket.tokens < cost:
             deficit = cost - bucket.tokens
-            retry_ms = (
-                int(deficit / self.refill_per_sec * 1000) + 1 if self.refill_per_sec else 1000
-            )
+            retry_ms = int(deficit / rate * 1000) + 1 if rate else 1000
             return False, bucket.tokens, retry_ms
 
         bucket.tokens -= cost

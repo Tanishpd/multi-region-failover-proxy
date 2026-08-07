@@ -154,6 +154,19 @@ class Settings(BaseSettings):
 
     graceful_shutdown_s: int = 5
 
+    # Refuse cleartext. Off in the demo (it is served over plain HTTP on
+    # localhost); on in production, where an ingress terminates TLS and is
+    # expected to forward X-Forwarded-Proto.
+    # Refuse a duplicate Idempotency-Key that is still in flight or already
+    # done. Off in the demo (nothing sends the header); on in production, where
+    # a replayed MAYBE_SENT against a billed API is a double charge.
+    idempotency_enabled: bool = False
+
+    require_tls: bool = False
+    # Sent only alongside require_tls, and only when the request arrived over
+    # HTTPS — announcing HSTS on a cleartext response is meaningless.
+    hsts_max_age_s: int = 31_536_000
+
     # Streaming is OFF in the demo profile so the graded behaviour is unchanged
     # by its presence, not merely equivalent.
     streaming_enabled: bool = False

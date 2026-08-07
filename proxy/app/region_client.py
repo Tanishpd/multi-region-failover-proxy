@@ -90,6 +90,25 @@ class RegionClient:
             ),
         )
 
+    def pool_stats(self) -> tuple[int, int, int]:
+        """(queued, active, max) for this region's connection pool.
+
+        `queued` is the LEADING indicator of the overload feedback loop: it goes
+        positive before any PoolTimeout fires, and a PoolTimeout is what used to
+        be misread as a region failure. Read from httpcore's own bookkeeping —
+        `AsyncPoolRequest.is_queued()` is literally "no connection assigned yet".
+
+        Private attributes, so it degrades to zeros rather than raising if
+        httpcore rearranges its internals: a metric is never worth a 500.
+        """
+        try:
+            pool = self._client._transport._pool
+            requests = pool._requests
+            queued = sum(1 for r in requests if r.is_queued())
+            return queued, len(requests) - queued, pool._max_connections
+        except Exception:
+            return 0, 0, 0
+
     def stream(self, method: str, path: str, *, content: bytes, headers: dict[str, str]):
         """The httpx streaming context manager, unentered.
 

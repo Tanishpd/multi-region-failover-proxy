@@ -14,6 +14,7 @@ configuration rather than constructing their own.
 from __future__ import annotations
 
 import ipaddress
+import re
 import sys
 from pathlib import Path
 
@@ -293,3 +294,71 @@ def test_admin_identity_parameter_is_validated() -> None:
     assert "_valid_identity" in api
     start = api.index("async def admin_ratelimit(")
     assert "_valid_identity(identity)" in api[start : start + 1200]
+
+
+# --- feature flags must be reachable, not just implemented ------------------
+
+
+def test_every_prod_setting_is_plumbed_through_compose() -> None:
+    """A flag the deployment cannot set is a flag that does not exist.
+
+    Hit twice for real: MRFP_STREAMING_ENABLED and MRFP_IDEMPOTENCY_ENABLED
+    were both implemented, tested, and unreachable — compose simply never
+    forwarded them, so the feature was silently off and the live check quietly
+    exercised the old path instead. Unit tests could not see it, because they
+    construct Settings directly.
+    """
+    import re
+
+    from app.profiles import preset
+
+    raw = (ROOT / "docker-compose.yml").read_text()
+    declared = set(re.findall(r"^\s+(MRFP_[A-Z0-9_]+):", raw, flags=re.M))
+
+    missing = sorted(
+        f"MRFP_{field.upper()}"
+        for field in preset("prod")
+        if f"MRFP_{field.upper()}" not in declared
+    )
+    assert not missing, f"prod-profile settings unreachable through compose: {missing}"
+
+
+def test_compose_defaults_do_not_break_coercion() -> None:
+    """An empty-string default fails pydantic coercion on a bool or int field.
+
+    The first attempt at plumbing used "${VAR:-}" for everything, which would
+    have stopped the proxy booting the moment compose passed an empty string
+    for MRFP_REQUIRE_TLS.
+
+    Empty is CORRECT for the string fields where it means "disabled"
+    (MRFP_ADMIN_TOKEN, MRFP_CHAOS_TOKEN), so the check is scoped by the field's
+    declared type rather than by name.
+    """
+    raw = (ROOT / "docker-compose.yml").read_text()
+    empty = re.findall(r'^\s+(MRFP_[A-Z0-9_]+): "\$\{[A-Z0-9_]+:-\}"', raw, flags=re.M)
+
+    offenders = []
+    for env in empty:
+        field = Settings.model_fields.get(env.removeprefix("MRFP_").lower())
+        if field is not None and field.annotation is not str:
+            offenders.append(f"{env} ({field.annotation.__name__})")
+    assert not offenders, f"empty-string defaults will fail coercion: {offenders}"
+
+
+def test_saturation_metrics_are_actually_written() -> None:
+    """A gauge that is never set makes its alert permanently silent.
+
+    proxy_region_pool_waiters was declared, alerted on in slo.yml, and never
+    written — so MRFPPoolQueueing could not fire. A dead alert is worse than no
+    alert: it creates confidence that something is being watched.
+    """
+    src = code_only(ROOT / "proxy" / "app" / "metrics.py")
+    api = code_only(ROOT / "proxy" / "app" / "api.py")
+    assert "def observe_pools" in src
+    assert "observe_pools" in api, "pool gauges are never refreshed at scrape time"
+
+    rules = (ROOT / "ops" / "observability" / "rules" / "slo.yml").read_text()
+    for metric in re.findall(r"(proxy_[a-z_]+)", rules):
+        if metric.endswith("_total"):
+            continue
+        assert metric in src, f"{metric} is alerted on but never defined"

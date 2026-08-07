@@ -34,6 +34,20 @@ POOL_WAITERS = Gauge(
     registry=REGISTRY,
 )
 
+POOL_ACTIVE = Gauge(
+    "proxy_region_pool_active",
+    "Connections currently in use, per region.",
+    ["region"],
+    registry=REGISTRY,
+)
+
+POOL_MAX = Gauge(
+    "proxy_region_pool_max",
+    "Connection pool ceiling, per region. Admission must stay below the smallest.",
+    ["region"],
+    registry=REGISTRY,
+)
+
 ADMISSION_INFLIGHT = Gauge(
     "proxy_admission_inflight",
     "Requests currently holding an admission slot.",
@@ -132,6 +146,20 @@ def observe_breaker(region: str, state: str) -> None:
 
 def observe_health(region: str, believed_ok: bool | None) -> None:
     REGION_BELIEVED_UP.labels(region).set(-1 if believed_ok is None else int(believed_ok))
+
+
+def observe_pools(clients) -> None:
+    """Refresh pool gauges at scrape time.
+
+    Same reason the health gauges are recomputed here: a gauge written only on
+    change goes stale exactly when nothing is happening, and "nothing is
+    happening" is what an outage looks like.
+    """
+    for region, client in clients.items():
+        queued, active, ceiling = client.pool_stats()
+        POOL_WAITERS.labels(region).set(queued)
+        POOL_ACTIVE.labels(region).set(active)
+        POOL_MAX.labels(region).set(ceiling)
 
 
 def render() -> bytes:

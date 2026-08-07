@@ -20,7 +20,9 @@ from starlette.routing import Route
 from app import api
 from app.auth import KeyStore
 from app.breaker import Breaker
+from app.cluster import BreakerGossip, replica_count
 from app.config import settings
+from app.idempotency import IdempotencyStore
 from app.logging_setup import configure, configure_policy, logx
 from app.middleware.context import ContextMiddleware
 from app.ratelimit.limiter import TokenBucketLimiter
@@ -28,6 +30,9 @@ from app.redis_client import build_redis
 from app.region_client import RegionClient
 from app.regions import RegionRegistry
 from app.router import ResilientRouter
+
+# Strong references to fire-and-forget gossip publishes.
+_BACKGROUND: set[asyncio.Task] = set()
 
 
 @asynccontextmanager
@@ -121,6 +126,22 @@ async def lifespan(app: Starlette):
         fail_mode=settings.rl_fail_mode,
         breaker=breaker,
     )
+    # With Redis down the fallback bucket is per-process, so N replicas would
+    # collectively enforce N x the configured limit. Dividing keeps the fleet
+    # total close to what was asked for.
+    limiter.local.replicas = replica_count()
+
+    gossip = None
+    if breaker is not None and redis is not None:
+        gossip = BreakerGossip(redis, breaker)
+
+        def _announce(region: str, state: str, code: str) -> None:
+            task = asyncio.create_task(gossip.publish(region, state, code))
+            _BACKGROUND.add(task)
+            task.add_done_callback(_BACKGROUND.discard)
+
+        breaker.on_transition = _announce
+        await gossip.start()
 
     app.state.settings = settings
     app.state.registry = registry
@@ -128,6 +149,12 @@ async def lifespan(app: Starlette):
     app.state.redis = redis
     app.state.limiter = limiter
     app.state.key_store = key_store
+    app.state.idempotency = IdempotencyStore(redis, enabled=settings.idempotency_enabled)
+    app.state.draining = False
+    # Parsed once, not per request.
+    from app.middleware.client_identity import parse_networks
+
+    app.state.trusted_networks = parse_networks(settings.trusted_proxies)
     # Admission must never exceed the SMALLEST per-region connection pool.
     # Above it, overload becomes PoolTimeout, which used to be recorded as a
     # region failure — opening a breaker on a region that was never contacted.
@@ -150,6 +177,7 @@ async def lifespan(app: Starlette):
     # The in-process fallback bucket has no TTL (Redis does), so without this
     # it grows one entry per distinct identity, forever — a slow memory leak
     # keyed by client IP.
+    app.state.gossip = gossip
     sweeper = asyncio.create_task(_sweep_local_buckets(limiter))
 
     logx(
@@ -158,6 +186,8 @@ async def lifespan(app: Starlette):
         primary=app.state.primary_region,
         rate_limit=f"{settings.rl_capacity} @ {settings.rl_refill_per_sec}/s",
         redis=bool(redis),
+        replicas=replica_count(),
+        gossip=gossip is not None,
         breaker=settings.resilient,
         admin=bool(settings.admin_token),
         chaos_bypass=bool(settings.chaos_mode),
@@ -165,6 +195,8 @@ async def lifespan(app: Starlette):
     try:
         yield
     finally:
+        if gossip is not None:
+            await gossip.stop()
         sweeper.cancel()
         with suppress(asyncio.CancelledError):
             await sweeper
@@ -194,6 +226,7 @@ def create_app() -> Starlette:
             Route("/v1/infer", api.infer, methods=["POST"]),
             Route("/healthz", api.healthz, methods=["GET"]),
             Route("/readyz", api.readyz, methods=["GET"]),
+            Route("/admin/drain", api.drain, methods=["POST"]),
             Route("/admin/regions", api.admin_regions, methods=["GET"]),
             Route("/metrics", api.metrics_endpoint, methods=["GET"]),
             Route("/admin/ratelimit", api.admin_ratelimit, methods=["GET", "DELETE"]),

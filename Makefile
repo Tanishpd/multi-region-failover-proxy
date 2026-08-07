@@ -33,7 +33,7 @@ RUFF    := $(VENV)/bin/ruff
 
 .PHONY: help doctor venv build up up-regions down ps health logs \
         test-unit test lint fmt docs-check chaos report bench reset clean \
-        prod-config prod-up prod-down
+        prod-config prod-up prod-down capacity
 
 # --- meta -------------------------------------------------------------------
 
@@ -106,6 +106,9 @@ report: venv
 
 bench:
 	@bash ops/scripts/bench.sh
+
+capacity:
+	@bash ops/scripts/capacity.sh
 
 # --- housekeeping -----------------------------------------------------------
 

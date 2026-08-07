@@ -67,6 +67,10 @@ async def infer(request: Request) -> Response:
     """POST /v1/infer — the only data-plane route."""
     state = request.app.state
 
+    tls = require_tls(request)
+    if tls is not None:
+        return tls
+
     # Admission gate. Buffered bodies times unbounded concurrency is an
     # unbounded memory commitment in a 256M container, so shed early and
     # cheaply rather than OOM under total-blackout. (ADR-006)
@@ -99,6 +103,25 @@ async def infer(request: Request) -> Response:
             logx("request_rejected", level=logging.WARNING, status=status, detail=detail)
             return problem(status, "body-rejected", title, detail)
 
+        # Claim the idempotency key BEFORE any upstream call, so a duplicate
+        # that arrives while the first is still running is refused rather than
+        # started. Released if we never reach an upstream, or the client's own
+        # correct retry would be blocked for the full TTL.
+        principal = getattr(request.state, "principal", None)
+        claim = await state.idempotency.claim(
+            principal.id if principal else getattr(request.state, "client_ip", "-"),
+            req.idempotency_key,
+        )
+        if not claim.may_proceed:
+            return problem(
+                409,
+                "idempotency-conflict",
+                "Duplicate request",
+                f"Idempotency-Key {req.idempotency_key!r} is {claim.state.value}. The original "
+                "request may still be running; this one was not started.",
+                request_id=req.request_id,
+            )
+
         if _wants_stream(req.body, state.settings.streaming_enabled):
             try:
                 return await _infer_streaming(request, req)
@@ -111,8 +134,17 @@ async def infer(request: Request) -> Response:
 
         try:
             result: ProxyResult = await state.router.route(req)
+        except BaseException:
+            await state.idempotency.release(claim)
+            raise
         finally:
             metrics.ADMISSION_INFLIGHT.dec()
+
+        if result.status < 500:
+            await state.idempotency.finish(claim)
+        else:
+            # Nothing was delivered, so the caller's retry must be allowed.
+            await state.idempotency.release(claim)
 
         if len(result.body) > state.settings.max_response_bytes:
             # The request side has a cap; the response side needs the same one.
@@ -148,6 +180,30 @@ async def healthz(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok"})
 
 
+async def drain(request: Request) -> Response:
+    """Begin draining: fail readiness while continuing to serve in-flight work.
+
+    This is the missing half of a safe deploy. Without it, SIGTERM is the first
+    thing that tells the load balancer anything, and every request in flight
+    when the container stops is a 502 the client sees.
+
+    The sequence a preStop hook should run:
+      1. POST /admin/drain   -> /readyz starts failing
+      2. sleep >= 2 x the LB's readiness interval  -> it stops sending new work
+      3. SIGTERM             -> uvicorn finishes what it is holding
+
+    /healthz deliberately keeps returning 200 throughout: liveness must not
+    fail during a drain, or the orchestrator kills the pod mid-request.
+    """
+    denied = _admin_denied(request)
+    if denied is not None:
+        return denied
+
+    request.app.state.draining = True
+    logx("draining", level=logging.WARNING)
+    return JSONResponse({"status": "draining"})
+
+
 async def readyz(request: Request) -> JSONResponse:
     """503 unless at least one region is currently believed usable.
 
@@ -156,7 +212,11 @@ async def readyz(request: Request) -> JSONResponse:
     counts as usable — with passive detection, refusing traffic on absence of
     evidence would be a self-fulfilling outage.
     """
-    router = request.app.state.router
+    state = request.app.state
+    if getattr(state, "draining", False):
+        return JSONResponse({"status": "draining", "usable": []}, status_code=503)
+
+    router = state.router
     usable = router.usable_regions()
     return JSONResponse(
         {
@@ -237,6 +297,45 @@ def _admin_denied(request: Request) -> Response | None:
     return None
 
 
+def require_tls(request: Request) -> Response | None:
+    """Refuse cleartext when TLS is expected.
+
+    The proxy does not terminate TLS — an ingress does — so the only thing it
+    can know is what that ingress tells it via X-Forwarded-Proto, and that
+    header is only believable from a trusted peer (the same rule as
+    X-Forwarded-For).
+
+    426 rather than a redirect: a 308 makes many clients re-issue without the
+    body, which for a POST-only API silently corrupts the request. 426 is
+    unambiguous and unrecoverable-by-accident.
+    """
+    settings = request.app.state.settings
+    if not settings.require_tls:
+        return None
+
+    peer = getattr(request.state, "peer", "")
+    trusted = request.app.state.trusted_networks
+    import ipaddress
+
+    try:
+        peer_trusted = any(ipaddress.ip_address(peer) in net for net in trusted)
+    except ValueError:
+        peer_trusted = False
+
+    proto = request.headers.get("x-forwarded-proto", "").lower() if peer_trusted else ""
+    if proto == "https" or request.url.scheme == "https":
+        return None
+
+    logx("cleartext_refused", level=logging.WARNING, peer=peer, proto=proto or "none")
+    return problem(
+        426,
+        "tls-required",
+        "TLS required",
+        "This endpoint is served over HTTPS only. The proxy saw a cleartext request "
+        "and no trusted X-Forwarded-Proto: https.",
+    )
+
+
 def _valid_identity(raw: str) -> bool:
     """Bucket identities are IPs. Anything else is someone probing.
 
@@ -265,6 +364,7 @@ async def metrics_endpoint(request: Request) -> Response:
             return denied
 
     router = request.app.state.router
+    metrics.observe_pools(request.app.state.clients)
     for region_id, health in router.health.items():
         metrics.observe_health(region_id, health.ok)
     if router.breaker is not None:
