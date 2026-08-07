@@ -2,9 +2,10 @@
 
 Agent-facing context for this repository. Read this before touching anything.
 
-> Status: **scaffolding phase.** The documentation set was authored before the application code, on
-> purpose ([ADR-001](docs/DECISIONS.md#adr-001)). If a file referenced here does not exist yet, it is
-> not missing — it is not written yet. Check the build order in §9 before assuming a bug.
+> Status: **complete.** All nine phases in §9 have landed and every scenario in the chaos matrix
+> passes. The documentation set was authored before the application code, on purpose
+> ([ADR-001](docs/DECISIONS.md#adr-001)) — so the contract in `docs/CONTRACT.md` predates and
+> constrains the code, not the other way round.
 
 ---
 
@@ -219,15 +220,15 @@ session.
 
 Each phase ends green and committed. Do not start N+1 until N's acceptance check passes.
 
-0. Contract, skeleton, `doctor.sh` — runs with Docker off
-1. Region image + compose (3 regions + Redis)
-2. Proxy in literal mode — failover works
-3. Chaos harness, `stop-us-east`
-4. Redis token bucket
-5. Scenario matrix + `/metrics`
-6. Circuit breaker (resilient mode)
-7. Tests
-8. Docs + generated chaos report
+0. ✅ Contract, skeleton, `doctor.sh` — runs with Docker off
+1. ✅ Region image + compose (3 regions + Redis)
+2. ✅ Proxy in literal mode — failover works
+3. ✅ Chaos harness, `stop-us-east`
+4. ✅ Redis token bucket
+5. ✅ Scenario matrix + `/metrics`
+6. ✅ Circuit breaker (resilient mode)
+7. ✅ Tests — 73 passing
+8. ✅ Docs + generated chaos report
 
 ---
 

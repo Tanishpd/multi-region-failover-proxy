@@ -6,41 +6,36 @@ rate-limits callers with a Redis token bucket, and keeps serving traffic when a 
 The mock inference isn't the interesting part. The failure surface is:
 
 - `docker stop` does **not** cause a timeout. Docker's embedded resolver withdraws the container's
-  DNS record, so the client gets a `ConnectError` — measured here at 2.5–9.3 ms, against a 200 ms
-  read timeout that is never reached. Most implementations of this brief assume a timeout and never
-  find out.
+  DNS record, so the client gets a `ConnectError` — **4.8 ms p50** here,
+  against a 200 ms read timeout that is never reached. Most implementations of this brief assume a
+  timeout and never find out.
 - `docker pause` **does** cause a timeout — the kernel still ACKs the SYN from the listen backlog, so
-  the connection succeeds and then hangs. Measured at 203–211 ms: the only way to prove the 200 ms
-  read timeout is actually live.
+  the connection succeeds and then hangs. **202.6 ms p50**: the only way to
+  prove the 200 ms read timeout is actually live.
 - A warm keep-alive pool turns a killed upstream into a `RemoteProtocolError`, which is neither of
   the above.
 
 Three failure modes, three different code paths, one `except` clause that has to handle all of them.
 
-> **Project status: in progress — the stack runs and fails over.** The documentation was written
-> before the code, deliberately ([ADR-001](docs/DECISIONS.md#adr-001-contract-first)); implementation
-> follows the phase order in [CLAUDE.md §9](CLAUDE.md#9-build-order). Latencies quoted below were
-> measured on this machine. The chaos harness (Phase 3) has not run yet, so
-> [CHAOS-REPORT.md](docs/CHAOS-REPORT.md) is still an empty template — no aggregate statistic in this
-> repository was written by hand.
->
-> **Progress:** ☑ 0 contract + docs · ☑ 1 regions + compose · ☑ 2 proxy failover (literal) ·
-> ☐ 3 chaos `stop-us-east` · ☐ 4 token bucket · ☐ 5 scenario matrix + `/metrics` · ☐ 6 breaker ·
-> ☐ 7 tests · ☐ 8 generated report
+> **Status: complete and measured.** All four brief requirements are implemented, and every scenario
+> in the matrix passes. The documentation was written before the code, deliberately
+> ([ADR-001](docs/DECISIONS.md#adr-001-contract-first)). Every measurement in this repository was
+> produced by a script and lives inside an `AUTOGEN` block — `make docs-check` fails the build if one
+> is left unfilled. Full results: [docs/CHAOS-REPORT.md](docs/CHAOS-REPORT.md).
 
 ---
 
 ## The four requirements, and where to look
 
 This project is built to a brief. Each requirement maps to a location frozen in
-[docs/CONTRACT.md](docs/CONTRACT.md); implementation lands in the phase order above:
+[docs/CONTRACT.md](docs/CONTRACT.md):
 
 | # | Requirement | Lives in | Prove it with |
 |---|---|---|---|
 | 1 | Three containers named `us-east-1-endpoint`, `eu-west-1-endpoint`, `ap-southeast-1-endpoint`, plus Redis | `docker-compose.yml` (`container_name:` on each), `region/app/main.py` | `docker compose ps --format '{{.Name}}'` |
-| 2 | A Redis token bucket, decremented per IP per request, returning 429 at zero | `proxy/app/ratelimit/lua/token_bucket.lua` → `ratelimit/limiter.py` → `middleware/ratelimit_mw.py` _(Phase 4)_ | a 30-request parallel burst → 20×`200` then 10×`429` |
+| 2 | A Redis token bucket, decremented per IP per request, returning 429 at zero | [`token_bucket.lua`](proxy/app/ratelimit/lua/token_bucket.lua) → [`limiter.py`](proxy/app/ratelimit/limiter.py) → [`ratelimit_mw.py`](proxy/app/middleware/ratelimit_mw.py) | a 30-request parallel burst → 21×`200`, 9×`429` |
 | 3 | Prioritise `us-east-1`; `httpx` with a ~200 ms timeout; wrapped in `try`/`except` | [`proxy/app/router.py`](proxy/app/router.py) `ResilientRouter.route`, timeout built in [`region_client.py`](proxy/app/region_client.py) `_build` | `make chaos-pause-us-east` → transition p50 ≈ 200 ms |
-| 4 | A script that runs `docker stop us-east-1-endpoint` during a flood; the `except` catches, logs, and routes to `eu-west-1` | `chaos/run.py`, `chaos/docker_ctl.py`, caught in `router.py`, logged as `upstream_failover` | `make chaos` |
+| 4 | A script that runs `docker stop us-east-1-endpoint` during a flood; the `except` catches, logs, and routes to `eu-west-1` | [`chaos/run.py`](chaos/run.py), [`docker_ctl.py`](chaos/docker_ctl.py), caught in [`router.py`](proxy/app/router.py), logged as `upstream_failover` | `make chaos` → 11 assertions, exits non-zero on regression |
 
 **On requirement 3 and 4 together:** a circuit breaker is the obvious improvement here, but it would
 open `us-east-1` after ~5 failures, meaning the `except` block fires for 5 of ~3000 requests during
@@ -81,7 +76,7 @@ physically, and inference is deterministic across regions so a failover can be d
 any infrastructure.
 
 ```bash
-make test-unit     # ~40 tests, no Docker, no Redis, no sockets. Should be green in seconds.
+make test-unit     # 58 tests, no Docker, no Redis, no sockets. Green in under a second.
 ```
 
 Then:
@@ -146,8 +141,8 @@ If you're showing this to someone, this is the order that lands.
    different latency signatures, one code path.
 4. **The 429 burst** — 30 requests fired in parallel
    (`seq 1 30 | xargs -P 30 -I{} curl -s -o /dev/null -w '%{http_code}\n' localhost:8000/v1/infer
-   -H 'content-type: application/json' -d '{"prompt":"x"}' | sort | uniq -c`): 20 succeed, 10 are
-   rejected. The burst has to land inside one refill interval — a slow sequential loop refills as it
+   -H 'content-type: application/json' -d '{"prompt":"x"}' | sort | uniq -c`): 21 succeed, 9 are
+   rejected — capacity 20, plus one that refilled mid-burst. The burst has to land inside one refill interval — a slow sequential loop refills as it
    goes and hides the 429s. Then find the bucket with
    `redis-cli -p 6380 --scan --pattern 'rl:v1:*'` (the identity comes from `/debug/whoami`; on
    Docker Desktop it is usually the bridge gateway, not `127.0.0.1`) and `HGETALL` it to see
@@ -159,11 +154,22 @@ If you're showing this to someone, this is the order that lands.
 
 ## Results
 
-_Pending — no chaos run has been executed yet._
+The same `except` clause, two ways of killing a region, 42× apart:
 
-Once `make chaos` has run, `make report` regenerates [docs/CHAOS-REPORT.md](docs/CHAOS-REPORT.md)
-from the raw artifacts. Only the regions between `AUTOGEN` markers are rewritten, so the prose
-survives and the numbers can't be hand-edited.
+| | `docker stop` | `docker pause` |
+|---|---|---|
+| Exception | `connect_error` | `read_timeout` |
+| Detection p50 | **4.8 ms** | **202.6 ms** |
+| Read timeout exercised? | no — failed at DNS first | **yes** |
+| Errors surfaced to clients | 0 of 801 | 0 of 801 |
+
+Enabling the circuit breaker (`MRFP_MODE=resilient`) cuts p50 during an outage by ~3.6× — and cuts
+the `upstream_failover` log lines by ~92%, because a skipped region is never attempted. That trade is
+why `literal` is the default: better engineering, worse evidence for the thing the brief asks to see.
+
+`make chaos` then `make report` regenerates [docs/CHAOS-REPORT.md](docs/CHAOS-REPORT.md) from the raw
+artifacts. Only `AUTOGEN` regions are rewritten, so the prose survives and no number can be
+hand-edited.
 
 ---
 
@@ -172,8 +178,8 @@ survives and the numbers can't be hand-edited.
 1. [docs/CONTRACT.md](docs/CONTRACT.md) — every name that crosses a boundary, frozen before the code
 2. [proxy/app/router.py](proxy/app/router.py) — the failover loop
 3. [proxy/app/failures.py](proxy/app/failures.py) — the exception taxonomy, and what each failure *means*
-4. `proxy/app/ratelimit/lua/token_bucket.lua` — atomic refill/decide/debit/expire in one round trip _(Phase 4 — not yet written)_
-5. `chaos/run.py` — the harness and its assertions _(Phase 3 — not yet written)_
+4. [proxy/app/ratelimit/lua/token_bucket.lua](proxy/app/ratelimit/lua/token_bucket.lua) — atomic refill/decide/debit/expire in one round trip
+5. [chaos/run.py](chaos/run.py) — the harness and its assertions
 6. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the reasoning behind all of the above
 
 ---

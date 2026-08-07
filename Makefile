@@ -89,7 +89,7 @@ fmt: venv
 	@$(RUFF) format .
 
 docs-check:
-	@bash ops/scripts/_todo.sh 8 "make docs-check"
+	@bash ops/scripts/docs_check.sh
 
 # --- chaos ------------------------------------------------------------------
 
@@ -100,8 +100,8 @@ chaos:
 chaos-%:
 	@bash ops/scripts/chaos.sh "$*"
 
-report:
-	@bash ops/scripts/_todo.sh 8 "make report"
+report: venv
+	@$(PY) -m chaos.report
 
 bench:
 	@bash ops/scripts/bench.sh

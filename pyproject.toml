@@ -26,6 +26,9 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101"]
+# The report renders markdown tables for humans; × and — are intentional there.
+"chaos/report.py" = ["RUF001"]
+"chaos/timeline.py" = ["RUF001"]
 
 [tool.ruff.lint.isort]
 # `app` is the package root inside both images (WORKDIR /app), so it is
