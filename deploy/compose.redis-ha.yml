@@ -1,0 +1,107 @@
+# A real Sentinel topology, so the HA path is exercised rather than asserted.
+#
+#   make redis-ha-up        bring up primary + replica + 3 sentinels
+#   make chaos-redis-failover  kill the primary mid-flood and measure the blip
+#   make redis-ha-down      tear it down
+#
+# WHY THREE SENTINELS. Failover needs a quorum, and a quorum of two is not a
+# quorum: either sentinel alone is a minority, so losing one leaves nobody able
+# to promote and the topology has HA in name only. Three tolerates one loss.
+#
+# WHY IT IS A SEPARATE FILE rather than an override. It replaces the single
+# `redis` service with five, and compose merge can add to a service but cannot
+# DELETE one — the same reason compose.prod.yml is standalone (ADR-020).
+#
+# Everything here reuses redis:7.2-alpine, so the whole topology costs no
+# additional image pull.
+#
+# RUN IT ALONE. Do not leave this up during `make chaos`. Three sentinels poll
+# continuously, and on this machine that background load was enough to push two
+# failover attempts past the 200 ms read timeout: a chaos run with the topology
+# up reported 5 x 503 (`attempt_deadline` on both secondaries) and A2 failed.
+# The same run with it torn down was 11/11 with zero errors. The chaos matrix
+# measures a 200 ms threshold, which makes it sensitive to anything else
+# competing for CPU — that sensitivity is the reason this is a separate file
+# and not part of the default stack.
+
+name: mrfp-redis-ha
+
+x-redis-common: &redis-common
+  image: redis:7.2-alpine
+  restart: "no" # a resurrected primary invalidates the failover timeline
+  networks: [mrfp-net]
+  healthcheck:
+    test: ["CMD", "redis-cli", "ping"]
+    interval: 2s
+    timeout: 2s
+    retries: 10
+
+services:
+  redis-primary:
+    <<: *redis-common
+    container_name: mrfp-redis-primary
+    # Cache-only, matching the demo: every key carries a TTL and both consumers
+    # fail open, so persistence would buy nothing and cost restart time. (ADR-014)
+    command: >
+      redis-server --save "" --appendonly no
+      --maxmemory 256mb --maxmemory-policy volatile-ttl
+
+  redis-replica:
+    <<: *redis-common
+    container_name: mrfp-redis-replica
+    depends_on:
+      redis-primary: {condition: service_healthy}
+    command: >
+      redis-server --save "" --appendonly no
+      --maxmemory 256mb --maxmemory-policy volatile-ttl
+      --replicaof redis-primary 6379
+      --replica-read-only yes
+
+  # Three sentinels, each writing its own config at start. Sentinel REWRITES its
+  # config file at runtime, so it cannot be a read-only bind mount — hence
+  # generating it in the entrypoint.
+  #
+  # down-after-milliseconds 2000 and failover-timeout 6000 are deliberately far
+  # tighter than Redis's defaults (30s / 180s). The bucket is a cache whose loss
+  # degrades to a local fallback, so a wrong promotion is cheap and a slow one
+  # is expensive — the opposite of the durability-first tradeoff the defaults
+  # assume.
+  sentinel-1: &sentinel
+    <<: *redis-common
+    container_name: mrfp-sentinel-1
+    depends_on:
+      redis-primary: {condition: service_healthy}
+    entrypoint:
+      - sh
+      - -c
+      - |
+        cat > /tmp/sentinel.conf <<EOF
+        port 26379
+        sentinel resolve-hostnames yes
+        sentinel announce-hostnames yes
+        sentinel monitor mrfp-master redis-primary 6379 2
+        sentinel down-after-milliseconds mrfp-master 2000
+        sentinel failover-timeout mrfp-master 6000
+        sentinel parallel-syncs mrfp-master 1
+        EOF
+        exec redis-sentinel /tmp/sentinel.conf
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "26379", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+
+  sentinel-2:
+    <<: *sentinel
+    container_name: mrfp-sentinel-2
+
+  sentinel-3:
+    <<: *sentinel
+    container_name: mrfp-sentinel-3
+
+networks:
+  mrfp-net:
+    # Joins the demo stack's network so the proxy can reach these by name
+    # without republishing anything.
+    name: mrfp-net
+    external: true

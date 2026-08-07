@@ -117,7 +117,16 @@ async def lifespan(app: Starlette):
         loaded = key_store.load()
         logx("api_keys_loaded", count=loaded, mode=settings.auth_mode)
 
-    redis = build_redis(settings.redis_url) if settings.redis_url else None
+    redis = (
+        build_redis(
+            settings.redis_url,
+            sentinels=settings.redis_sentinels,
+            master_name=settings.redis_master_name,
+            password=settings.redis_password,
+        )
+        if (settings.redis_url or settings.redis_sentinels)
+        else None
+    )
     limiter = TokenBucketLimiter(
         redis,
         capacity=settings.rl_capacity,

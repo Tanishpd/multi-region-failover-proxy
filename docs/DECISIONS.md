@@ -683,3 +683,96 @@ while refusing all traffic because a cache is down is an outage.
 **Consequence.** A claim is *released* rather than marked done when the request never reached an
 upstream or returned 5xx — otherwise a correct client retry would be refused for the full 15-minute
 TTL. Verified live: first use of a key 200, replay 409, a different key 200, no key 200.
+
+---
+
+<a id="adr-027"></a>
+
+## ADR-027: Support Sentinel — correcting ADR-025's rejection of it
+
+**Date:** 2026-08-07 · **Status:** accepted, supersedes a claim in [ADR-025](#adr-025)
+
+**Context.** [ADR-025](#adr-025) said Sentinel was "deliberately rejected — split-brain serves two
+full buckets, which is worse than the fail-open path it replaces." **That comparison was wrong**, and
+it was wrong in a way worth recording rather than quietly editing.
+
+Split-brain during a partition means up to **2x** the configured limit, for the seconds it takes
+Sentinel to converge. The fail-open path it was being compared against enforces *approximately 1x*
+via the local bucket — but only because [ADR-025](#adr-025) added the replica divisor. Even granting
+that, the comparison was against the wrong alternative: the question is not "is split-brain worse
+than fail-open", it is "is a seconds-long 2x window worse than dropping the shared bucket entirely
+every time a single node dies." It is not.
+
+**Decision.** Support Sentinel (`MRFP_REDIS_SENTINELS` + `MRFP_REDIS_MASTER_NAME`), not as the
+default, and drill it rather than assert it. A single URL remains the default and is still the right
+answer when a managed Redis hides failover behind one stable endpoint.
+
+Three things the drill taught that the design did not:
+
+1. **`SentinelConnectionPool` raises on exhaustion.** redis-py builds it on the plain
+   `ConnectionPool`, so adopting Sentinel would have silently reintroduced the exact failure
+   [ADR-013](#adr-013) uses `BlockingConnectionPool` to avoid — a healthy burst needing one more
+   connection would read as "Redis is down". `BlockingSentinelConnectionPool` mixes the two; the
+   mixin is sound because `SentinelConnectionPool` overrides only `reset`, `owns_connection` and
+   discovery, and connection acquisition is inherited untouched.
+2. **Ask which node is primary; never assume.** The first drill killed the container *named*
+   `mrfp-redis-primary` and measured a flawless zero-error failover — because an earlier run had
+   already promoted the other node, so it had killed a replica. A drill that assumes the topology it
+   is testing measures nothing.
+3. **Sentinel can only promote if a synced replica exists.** Three back-to-back runs gave
+   PASS / no-promotion / PASS, because the second killed the primary while the previously-killed node
+   was still resyncing. That looked exactly like a client bug and was not one. The drill now blocks
+   until Sentinel reports `master-link-status: ok`, and is deterministic across runs.
+
+**Consequence.** Measured, `make redis-ha-drill`: Sentinel detects and promotes in **~1.3 s**
+(`+sdown` to `+switch-master`); the client resumes serving **~3.5–4.1 s** after the kill across five
+runs. The extra ~2.5 s is the client's own reconnect cycle — `MasterNotFoundError` while Sentinel is
+still deciding, then a fresh connect. During that window the limiter degrades to the local bucket,
+which is the designed behaviour and needed no change.
+
+Two data nodes still means a restarted old primary briefly believes it is a primary before Sentinel
+demotes it. `min-replicas-to-write` would close that, but on a two-node topology it also makes losing
+one node stop writes entirely — strictly worse. Three data nodes is the production shape; this is
+documented rather than pretended away.
+
+---
+
+<a id="adr-028"></a>
+
+## ADR-028: Derive the timeouts from measurement, and gate on it
+
+**Date:** 2026-08-07 · **Status:** accepted
+
+**Context.** `MRFP_READ_TIMEOUT_MS=200` is the brief's number and is defensible because the brief
+says so. The prod profile's `30000` was not — nobody measured anything to arrive at it, and I said so
+when asked whether the system was production-grade.
+
+The deeper problem: **nothing in this repository could have justified it.** The mock region slept for
+a constant regardless of `max_tokens`, so an 8-token request and a 512-token one measured the same.
+Measuring a constant tells you nothing about what generation costs, so any derived timeout would have
+been a guess wearing a measurement's clothes.
+
+**Decision.** Make the mock's latency scale with the work requested (`TTFT + n x ITL`, the shape real
+serving has), let a region forward to a real OpenAI-compatible endpoint so the same tool can measure
+reality, and add `make calibrate` to sweep `max_tokens`, fit the curve, and derive the timeouts.
+`make calibrate-check` exits non-zero when a configured timeout falls below the measurement — a gate,
+not a report.
+
+The tool labels every run `backend: mock` or `backend: upstream`. Numbers derived from the mock
+describe the mock. What changed is not that the number became true, but that it stopped being a
+guess: there is now a procedure, it is one command, and it runs against production when production
+exists.
+
+**Consequence — the finding that justified the work.** A read timeout is usually reasoned about as
+*how long before I give up on a sick region*. It is also, silently, a **capability ceiling**: any
+request whose honest service time exceeds it can never be served by that region, however healthy it
+is.
+
+At the brief's 200 ms, ap-southeast-1 serves at most ~122–132 tokens. Reproduced end to end: with the
+two faster regions stopped, `max_tokens=8` returns 200 from ap-southeast-1 in 183 ms, and
+`max_tokens=512` returns **503** — `read_timeout(201.8ms)` against a region that was working
+perfectly and would have answered in ~310 ms.
+
+This is not a bug in the demo profile; 200 ms is frozen by the brief. It is a real property of that
+number, it was invisible while every request cost the same, and it is exactly the class of defect
+this tool exists to surface. `make calibrate` now prints the per-region token ceiling on every run.

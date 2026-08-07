@@ -69,6 +69,13 @@ class Settings(BaseSettings):
     # misconfiguration, not a mode.
     require_redis: bool = True
 
+    # Sentinel HA. `host:port,host:port` — when set, this WINS over redis_url,
+    # because a deployment with both is telling us it has an HA topology and a
+    # convenience URL, and only one of those survives losing a node. (ADR-027)
+    redis_sentinels: str = ""
+    redis_master_name: str = "mrfp-master"
+    redis_password: str = ""
+
     regions_file: str = "/config/regions.yaml"
     region_priority: str = ""
 
@@ -203,11 +210,21 @@ class Settings(BaseSettings):
         if self.rl_fail_mode not in {"open", "closed"}:
             problems.append(f"MRFP_RL_FAIL_MODE={self.rl_fail_mode!r} is not 'open' or 'closed'")
 
-        if self.require_redis and not self.redis_url:
+        if self.require_redis and not (self.redis_url or self.redis_sentinels):
             problems.append(
-                "MRFP_REDIS_URL is unset. Without it the token bucket is per-process, so N "
-                "replicas enforce N times the configured limit. Set it, or set "
-                "MRFP_REQUIRE_REDIS=0 to run deliberately without Redis."
+                "Neither MRFP_REDIS_URL nor MRFP_REDIS_SENTINELS is set. Without one the token "
+                "bucket is per-process, so N replicas enforce N times the configured limit. Set "
+                "one, or set MRFP_REQUIRE_REDIS=0 to run deliberately without Redis."
+            )
+
+        # A sentinel list with no master name resolves nothing. redis-py would
+        # raise MasterNotFoundError on the first command instead of at boot,
+        # which reads as "Redis is down" and silently degrades every request to
+        # the local bucket.
+        if self.redis_sentinels and not self.redis_master_name:
+            problems.append(
+                "MRFP_REDIS_SENTINELS is set but MRFP_REDIS_MASTER_NAME is empty, so no primary "
+                "can ever be discovered."
             )
 
         # The budget must fit the walk it is meant to bound, or the last region

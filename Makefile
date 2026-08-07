@@ -110,6 +110,28 @@ bench:
 capacity:
 	@bash ops/scripts/capacity.sh
 
+# Derive the timeouts from measurement rather than asserting them. `-check`
+# exits non-zero when a configured timeout is below the measured requirement.
+calibrate:
+	@bash ops/scripts/calibrate.sh
+
+calibrate-check:
+	@bash ops/scripts/calibrate.sh check
+
+# --- redis high availability -------------------------------------------------
+# A real Sentinel topology (primary + replica + 3 sentinels), so the HA claim is
+# drilled rather than asserted. Joins the demo stack's network; `make up` first.
+
+redis-ha-up:
+	@docker compose -f deploy/compose.redis-ha.yml up -d --wait
+
+redis-ha-down:
+	@docker compose -f deploy/compose.redis-ha.yml down
+
+# Kills whichever node Sentinel currently calls primary and measures the blip.
+redis-ha-drill:
+	@bash ops/scripts/redis-ha-drill.sh
+
 # --- housekeeping -----------------------------------------------------------
 
 reset:

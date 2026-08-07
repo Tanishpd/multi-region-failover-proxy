@@ -67,7 +67,7 @@ jobs:
       - run: docker compose up -d --wait --wait-timeout 120 redis us-east-1-endpoint eu-west-1-endpoint ap-southeast-1-endpoint mrfp-proxy
         env:
           MRFP_ADMIN_TOKEN: ci-admin-token
-      - run: docker compose up -d --no-deps redis-sentinel-seed
+      - run: docker compose up -d --no-deps redis-guard-seed
       - run: bash ops/scripts/chaos.sh stop-us-east --rps 20 --duration 14
         env:
           MRFP_CI: "1"

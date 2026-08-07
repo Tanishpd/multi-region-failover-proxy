@@ -13,7 +13,7 @@ require_daemon
 
 SCOPE="${1:-all}"
 
-# The wait list holds only LONG-RUNNING services. redis-sentinel-seed writes the
+# The wait list holds only LONG-RUNNING services. redis-guard-seed writes the
 # test sentinel key and exits 0, and `--wait` reads any exit — including a clean
 # one — as a failed startup.
 case "$SCOPE" in
@@ -26,7 +26,7 @@ printf 'up: starting %s\n' "$SCOPE"
 dc up -d --wait --wait-timeout 90 "${WAIT_FOR[@]}"
 
 # Seed after Redis is healthy; run to completion rather than waiting on it.
-dc up -d --no-deps redis-sentinel-seed >/dev/null
+dc up -d --no-deps redis-guard-seed >/dev/null
 
 printf '\n'
 bash "$(dirname "${BASH_SOURCE[0]}")/health.sh"

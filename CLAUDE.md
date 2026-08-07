@@ -56,6 +56,9 @@ the bug.
 | `region/app/` | The parameterized mock region. One image, three services. |
 | `chaos/run.py` | Chaos CLI. Exits non-zero when an assertion fails. |
 | `chaos/flood.py` | Open-loop request pacer. |
+| `chaos/calibrate.py` | Derives the timeouts from measurement. Gate, not report. |
+| `ops/scripts/redis-ha-drill.sh` | Kills the current Redis primary and times recovery. |
+| `deploy/compose.redis-ha.yml` | Sentinel topology. Run it ALONE, never during `make chaos`. |
 | `ops/scripts/doctor.sh` | Preflight. Run this when anything is confusing. |
 | `config/regions.yaml` | The region registry — the only place regions are defined. |
 
@@ -81,6 +84,11 @@ make logs         # follow proxy logs
 make ps           # what's running
 make health       # one-line status per region
 make bench        # ApacheBench cross-check (POST payload via -p)
+make calibrate    # measure region latency vs max_tokens; derive the timeouts
+make calibrate-check  # ...and exit non-zero if a configured timeout is too small
+make redis-ha-up  # Sentinel topology: primary + replica + 3 sentinels
+make redis-ha-drill   # kill the CURRENT primary under load; measure the blip
+make redis-ha-down
 make lint         # ruff check
 make fmt          # ruff format
 make docs-check   # fail on TODOs or numbers outside AUTOGEN blocks
@@ -187,6 +195,13 @@ session.
 
 **Redis**
 
+- `SentinelConnectionPool` extends the **plain** `ConnectionPool`, which *raises* on exhaustion —
+  adopting Sentinel naively undoes the `BlockingConnectionPool` decision. Use
+  `BlockingSentinelConnectionPool`.
+- A Sentinel drill must **ask which node is primary**, never assume the container named `primary`
+  is one, and must **wait for a synced replica** before injecting — Sentinel cannot promote without
+  one, and the resulting "no promotion" looks exactly like a client bug.
+
 - Lua → RESP conversion **truncates floats**. Return integers only (tokens are returned ×1000).
 - `tostring()` in Lua 5.1 uses `%.14g`: a bare 13-digit millisecond epoch survives, but anything
   with ≥15 significant digits — a microsecond epoch, or a ms epoch carrying a fraction from `TIME`'s
@@ -211,6 +226,8 @@ session.
 - The single-`EVALSHA` atomicity of the token bucket.
 - The proxy healthcheck's independence from region health.
 - `MRFP_MODE` defaulting to `literal`.
+- Running `deploy/compose.redis-ha.yml` alongside `make chaos`. Three sentinels polling was enough
+  background load to push two failover attempts past the 200 ms read timeout and fail A2.
 - Adding an **active health poller**. It would detect an outage before any data-plane request
   failed, so the brief's `except` block would never fire. This was considered and deliberately cut.
 

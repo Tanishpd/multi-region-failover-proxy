@@ -197,3 +197,45 @@ def test_blackhole_parks_without_a_timer() -> None:
     src = (ROOT / "region" / "app" / "chaos.py").read_text()
     assert "asyncio.Event().wait()" in src
     assert not re.search(r"asyncio\.sleep\(", src), "no timer in the blackhole path"
+
+
+# --- latency that scales with the work requested (ADR-028) -------------------
+
+REGION_MAIN = (ROOT / "region" / "app" / "main.py").read_text()
+REGION_SETTINGS = (ROOT / "region" / "app" / "settings.py").read_text()
+
+
+def test_region_latency_depends_on_max_tokens() -> None:
+    """The defect that made every derived timeout circular.
+
+    While the mock slept for a constant, an 8-token request and a 512-token one
+    measured identically, so no sweep could ever justify a read timeout. If this
+    term is dropped, `make calibrate` silently starts fitting a flat line and
+    reports a per-token cost of zero.
+    """
+    assert "max_tokens * settings.per_token_ms" in REGION_MAIN
+    assert "per_token_ms: float" in REGION_SETTINGS
+
+
+def test_simulate_latency_is_given_the_token_count() -> None:
+    """A no-arg _simulate_latency() cannot scale, whatever the settings say."""
+    assert "async def _simulate_latency(max_tokens: int)" in REGION_MAIN
+    assert "_simulate_latency(body.max_tokens)" in REGION_MAIN
+
+
+def test_the_metadata_endpoint_states_which_backend_answered() -> None:
+    """A calibration number is only meaningful beside a statement of what was
+    on the other end. Numbers from the mock must never read as production."""
+    assert '"backend": "upstream" if settings.upstream_enabled else "mock"' in REGION_MAIN
+
+
+def test_the_real_upstream_is_off_unless_explicitly_configured() -> None:
+    """The chaos matrix must never depend on someone else's inference queue."""
+    assert 'upstream_base_url: str = ""' in REGION_SETTINGS
+    assert "return bool(self.upstream_base_url)" in REGION_SETTINGS
+
+
+def test_upstream_failure_is_502_not_the_injected_503() -> None:
+    """Conflating 'the real model failed' with 'I was told to fail' would make a
+    calibration run against a flaky provider look like an injected fault."""
+    assert "status_code=502" in REGION_MAIN

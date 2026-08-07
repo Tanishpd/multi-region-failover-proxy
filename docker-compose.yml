@@ -177,7 +177,7 @@ services:
   # in db 15. Its absence means "this is not our Redis" regardless of the db
   # index, which is what protects the developer's own instance on 6379.
   # docs/CONTRACT.md section 10.
-  redis-sentinel-seed:
+  redis-guard-seed:
     image: redis:7.2-alpine
     container_name: mrfp-redis-seed
     networks: [mrfp-net]

@@ -37,12 +37,12 @@ Stated before the first run, so the result can contradict it.
 <!-- AUTOGEN:BEGIN:environment -->
 | | |
 |---|---|
-| Generated | 2026-08-07T04:47:58+00:00 |
+| Generated | 2026-08-07T09:00:55+00:00 |
 | Host | Darwin 25.5.0, arm64 |
 | Docker | 29.5.3 |
 | Compose | 5.1.4 |
 | Proxy mode | literal |
-| Git commit | 6b8e4fc |
+| Git commit | ba4d1f1 |
 
 Read timeout 200 ms, connect 100 ms, pool 50 ms, total budget 900 ms.
 Rate limit: capacity 20, refill 20/s. Load: 50 rps, open-loop.
@@ -93,8 +93,8 @@ Recorded by the harness itself, so this report cannot claim a command it never e
 
 <!-- AUTOGEN:BEGIN:commands-stop-us-east -->
 ```
-$ docker stop us-east-1-endpoint    # returned in 434 ms
-$ docker start us-east-1-endpoint    # returned in 114 ms
+$ docker stop us-east-1-endpoint    # returned in 603 ms
+$ docker start us-east-1-endpoint    # returned in 122 ms
 ```
 <!-- AUTOGEN:END -->
 
@@ -108,23 +108,23 @@ Requests per second by serving region, around the fault.
 ```
  sec | us-east | eu-west |  ap-se |  err |  p99ms | traffic
 -----------------------------------------------------------
-   0 |      50 |       0 |      0 |    0 |     34 | ████████████
-   1 |      50 |       0 |      0 |    0 |     34 | ████████████
-   2 |      50 |       0 |      0 |    0 |     31 | ████████████
-   3 |      50 |       0 |      0 |    0 |     30 | ████████████
-   4 |       5 |      45 |      0 |    0 |    178 | ████████████   <- fault injected; fault complete
-   5 |       0 |      50 |      0 |    0 |     84 | ████████████
-   6 |       0 |      50 |      0 |    0 |     84 | ████████████
-   7 |       0 |      50 |      0 |    0 |     87 | ████████████
-   8 |       0 |      50 |      0 |    0 |     85 | ████████████   <- repairing
-   9 |      48 |       2 |      0 |    0 |     71 | ████████████
-  10 |      50 |       0 |      0 |    0 |     33 | ████████████
-  11 |      50 |       0 |      0 |    0 |     31 | ████████████   <- repaired
-  12 |      50 |       0 |      0 |    0 |     32 | ████████████
-  13 |      50 |       0 |      0 |    0 |     30 | ████████████
-  14 |      50 |       0 |      0 |    0 |     32 | ████████████
-  15 |      50 |       0 |      0 |    0 |    112 | ████████████
-  16 |       1 |       0 |      0 |    0 |     25 | ▁
+   0 |      50 |       0 |      0 |    0 |     35 | ████████████
+   1 |      50 |       0 |      0 |    0 |     32 | ████████████
+   2 |      50 |       0 |      0 |    0 |     37 | ████████████
+   3 |      50 |       0 |      0 |    0 |     66 | ████████████
+   4 |       8 |      42 |      0 |    0 |    178 | ████████████   <- fault injected; fault complete
+   5 |       0 |      50 |      0 |    0 |     96 | ████████████
+   6 |       0 |      50 |      0 |    0 |    104 | ████████████
+   7 |       0 |      50 |      0 |    0 |     89 | ████████████
+   8 |       0 |      50 |      0 |    0 |     90 | ████████████   <- repairing
+   9 |      37 |      13 |      0 |    0 |     81 | ████████████
+  10 |      50 |       0 |      0 |    0 |     37 | ████████████
+  11 |      50 |       0 |      0 |    0 |     43 | ████████████   <- repaired
+  12 |      50 |       0 |      0 |    0 |     35 | ████████████
+  13 |      50 |       0 |      0 |    0 |     36 | ████████████
+  14 |      50 |       0 |      0 |    0 |     37 | ████████████
+  15 |      50 |       0 |      0 |    0 |     37 | ████████████
+  16 |       1 |       0 |      0 |    0 |     40 | ▁
 ```
 <!-- AUTOGEN:END -->
 
@@ -165,9 +165,9 @@ Three windows: **before** the fault (baseline), **during** the outage, and **aft
 <!-- AUTOGEN:BEGIN:summary-stop-us-east -->
 | Window | Requests | Success | Errors | p50 | p99 | Regions serving |
 |---|---|---|---|---|---|---|
-| baseline | 200 | 200 | 0 | 25.9 ms | 33.4 ms | us-east-1 ×200 |
-| outage | 200 | 200 | 0 | 76.7 ms | 84.2 ms | eu-west-1 ×200 |
-| recovery | 173 | 173 | 0 | 26.8 ms | 92.7 ms | us-east-1 ×173 |
+| baseline | 200 | 200 | 0 | 27.6 ms | 37.5 ms | us-east-1 ×200 |
+| outage | 200 | 200 | 0 | 81.5 ms | 98.7 ms | eu-west-1 ×200 |
+| recovery | 164 | 164 | 0 | 29.0 ms | 37.2 ms | us-east-1 ×164 |
 <!-- AUTOGEN:END -->
 
 ### Assertions
@@ -178,14 +178,14 @@ Three windows: **before** the fault (baseline), **during** the outage, and **aft
 | A1 | no client-side errors | PASS | 0 of 801 requests failed client-side |
 | A2 | no 5xx or 429 surfaced | PASS | 0 error responses of 801 (0.00%) |
 | A3 | nothing served by us-east-1 during the outage | PASS | 0 of 140 scored requests were still served by us-east-1 (last 1.2s before repair excluded: rescuable in flight) |
-| A4 | failover detected quickly | PASS | first eu-west-1 success 10 ms after the stop completed (budget 1500 ms) |
-| A5 | transition p99 within budget | PASS | p99 84 ms during vs 33 ms baseline (ceiling 633 ms) |
-| A8 | failover was logged with an error class | PASS | 247 upstream_failover lines from us-east-1; error_class=['ConnectError', 'ConnectTimeout']; hops=['us-east-1->eu-west-1'] |
-| A9 | log lines correlate with the harness | PASS | 247 of 247 failover lines matched a request_id |
-| A11 | docker stop returned promptly | PASS | docker stop took 434 ms |
+| A4 | failover detected quickly | PASS | first eu-west-1 success 16 ms after the stop completed (budget 1500 ms) |
+| A5 | transition p99 within budget | PASS | p99 99 ms during vs 37 ms baseline (ceiling 637 ms) |
+| A8 | failover was logged with an error class | PASS | 255 upstream_failover lines from us-east-1; error_class=['ConnectError', 'ConnectTimeout', 'ReadError']; hops=['us-east-1->eu-west-1'] |
+| A9 | log lines correlate with the harness | PASS | 255 of 255 failover lines matched a request_id |
+| A11 | docker stop returned promptly | PASS | docker stop took 603 ms |
 | A12 | achieved throughput >= 90% of target | PASS | 50.1 rps achieved vs 50 target |
 | A13 | every failed-over request hit the except block | PASS | 200 of 200 failed-over requests have an upstream_failover line (100.0%) |
-| A14 | traffic returned to us-east-1 after restart | PASS | 173 of 173 post-recovery requests served by us-east-1 |
+| A14 | traffic returned to us-east-1 after restart | PASS | 164 of 164 post-recovery requests served by us-east-1 |
 <!-- AUTOGEN:END -->
 
 _Assertion ids are global across the scenario matrix: A6 and A7 belong to the `pause-us-east` and
@@ -205,13 +205,13 @@ The same `except` clause, two fault injections, two entirely different latency s
 | | `docker stop` | `docker pause` |
 |---|---|---|
 | Exception class | `connect_error` ×200 | `read_timeout` ×195 |
-| Detection p50 | **4.8 ms** | **202.6 ms** |
-| Detection p99 | 7.7 ms | 206.8 ms |
-| Detection min / max | 2.9 / 13.1 ms | 200.3 / 228.1 ms |
-| Outage-window p50 | 76.7 ms | 275.9 ms |
+| Detection p50 | **6.1 ms** | **202.6 ms** |
+| Detection p99 | 17.6 ms | 206.8 ms |
+| Detection min / max | 3.6 / 28.5 ms | 200.3 / 228.1 ms |
+| Outage-window p50 | 81.5 ms | 275.9 ms |
 | Read timeout exercised? | no — failed at DNS first | **yes** |
 
-Ratio of detection p50: **42×**.
+Ratio of detection p50: **33×**.
 <!-- AUTOGEN:END -->
 
 **The hypothesis held.** `docker stop` fails in single-digit milliseconds via DNS withdrawal;
