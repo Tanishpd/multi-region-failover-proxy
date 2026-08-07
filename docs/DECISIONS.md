@@ -646,8 +646,22 @@ Two details matter. Remote messages apply the **verdict**, not the counters — 
 replica's failure count would double-count the same evidence. And a transition applied *from* gossip
 is never re-announced, or two replicas echo each other indefinitely.
 
-**Consequence.** Verified against a real Redis with two breakers: replica-2 opened from replica-1's
-verdict with zero local failures, and closed again on recovery, with one publish and one apply.
+**Consequence — and a correction.** The original verification here used a hand-built client, so it
+never touched the shipped configuration. **Booting the production profile showed gossip had never
+worked at all**: `_TUNING` sets `socket_timeout` to 50 ms so a sick Redis cannot add latency to a
+request, and `pubsub.listen()` blocks until a message arrives — so every subscribe expired within
+50 ms and all three replicas reconnected on a two-second loop forever, delivering nothing.
+
+SUBSCRIBE waits; PUBLISH is an ordinary fast command. They need opposite timeout policies, so they
+now get separate clients (`build_redis(pubsub=True)`), with `health_check_interval` rather than a
+read cap detecting a dead subscriber.
+
+Re-verified on the real topology — three prod replicas, one publish, `PUBLISH` reporting 3
+subscribers — all three applied it: `state: open`, `consecutive_failures: 0` (the verdict, not the
+counters), `transitions: 1`.
+
+The original claim also held, against a real Redis with two breakers: replica-2 opened from
+replica-1's verdict with zero local failures, and closed again on recovery, with one publish and one apply.
 Eventual consistency is fine here — a breaker is a heuristic about a region's health, not a lock,
 and two replicas briefly disagreeing costs one extra probe.
 

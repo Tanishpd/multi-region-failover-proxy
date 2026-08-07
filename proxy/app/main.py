@@ -177,8 +177,18 @@ async def lifespan(app: Starlette):
     limiter.local.replicas = replica_count()
 
     gossip = None
+    gossip_redis = None
     if breaker is not None and redis is not None:
-        gossip = BreakerGossip(redis, breaker)
+        # A second client, tuned for a blocking subscribe rather than the hot
+        # path. See build_redis(pubsub=True).
+        gossip_redis = build_redis(
+            settings.redis_url,
+            sentinels=settings.redis_sentinels,
+            master_name=settings.redis_master_name,
+            password=settings.redis_password,
+            pubsub=True,
+        )
+        gossip = BreakerGossip(redis, breaker, pubsub_redis=gossip_redis)
 
         def _announce(region: str, state: str, code: str) -> None:
             task = asyncio.create_task(gossip.publish(region, state, code))
@@ -247,6 +257,8 @@ async def lifespan(app: Starlette):
             await sweeper
         for client in clients.values():
             await client.aclose()
+        if gossip_redis is not None:
+            await gossip_redis.aclose()
         if redis is not None:
             await redis.aclose()
         logx("shutdown")

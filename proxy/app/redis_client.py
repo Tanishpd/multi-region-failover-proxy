@@ -76,6 +76,21 @@ _TUNING = {
 }
 
 
+# A subscriber holds one connection open and waits. It must NOT inherit the
+# hot path's 50 ms read ceiling, which would expire between messages on an idle
+# channel — which is most of the time, since breaker transitions are rare.
+# `health_check_interval` is what actually detects a dead connection here.
+_PUBSUB_TUNING = {
+    "max_connections": 8,
+    "timeout": 5.0,
+    "socket_timeout": None,
+    "socket_connect_timeout": 5.0,
+    "retry_on_timeout": False,
+    "health_check_interval": 30,
+    "decode_responses": True,
+}
+
+
 class BlockingSentinelConnectionPool(SentinelConnectionPool, BlockingConnectionPool):
     """A Sentinel-aware pool that WAITS for a free connection instead of raising.
 
@@ -159,17 +174,26 @@ def build_redis(
     sentinels: str = "",
     master_name: str = "mymaster",
     password: str = "",
+    pubsub: bool = False,
 ) -> Redis:
     """Build the client for whichever topology is configured.
 
     Sentinel wins when configured, because a deployment that has both set is
     telling us it has an HA topology and a convenience URL, and the HA topology
     is the one that survives a node loss.
+
+    `pubsub=True` returns a client tuned for a LONG-LIVED BLOCKING SUBSCRIBE
+    instead of the hot path. This is not a nicety: `_TUNING` sets
+    `socket_timeout` to 50 ms so a sick Redis cannot add latency to a request,
+    and `pubsub.listen()` blocks until a message arrives — so on the shared
+    client every subscribe timed out within 50 ms, forever. Breaker gossip
+    reconnected every 2 seconds in every replica and never delivered a single
+    message. Found only by booting the production profile and reading its log.
     """
     if sentinels:
-        return _build_sentinel(sentinels, master_name, password)
+        return _build_sentinel(sentinels, master_name, password, pubsub=pubsub)
 
-    kwargs = dict(_TUNING)
+    kwargs = dict(_PUBSUB_TUNING if pubsub else _TUNING)
     # The password applies to BOTH topologies. It previously applied only to the
     # Sentinel path, which made the production profile silently unauthenticated:
     # compose demands MRFP_REDIS_PASSWORD and starts Redis with --requirepass,
@@ -187,7 +211,9 @@ def build_redis(
     return Redis(connection_pool=pool)
 
 
-def _build_sentinel(sentinels: str, master_name: str, password: str) -> Redis:
+def _build_sentinel(
+    sentinels: str, master_name: str, password: str, *, pubsub: bool = False
+) -> Redis:
     nodes = _parse_sentinels(sentinels)
 
     # The sentinels themselves get their own, even tighter timeouts. Discovery
@@ -200,7 +226,7 @@ def _build_sentinel(sentinels: str, master_name: str, password: str) -> Redis:
 
     manager = Sentinel(nodes, sentinel_kwargs=sentinel_kwargs)
 
-    kwargs = dict(_TUNING)
+    kwargs = dict(_PUBSUB_TUNING if pubsub else _TUNING)
     if password:
         kwargs["password"] = password
 

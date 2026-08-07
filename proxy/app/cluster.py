@@ -47,8 +47,13 @@ CHANNEL = "mrfp:breaker:v1"
 class BreakerGossip:
     """Publishes local breaker transitions and applies remote ones."""
 
-    def __init__(self, redis, breaker, *, node_id: str | None = None) -> None:
+    def __init__(self, redis, breaker, *, node_id: str | None = None, pubsub_redis=None) -> None:
         self._redis = redis
+        # SUBSCRIBE holds a connection open and waits; PUBLISH is an ordinary
+        # fast command. They need opposite timeout policies, so they get
+        # separate clients. Sharing one meant every subscribe expired against
+        # the hot path's 50 ms read ceiling and gossip never delivered anything.
+        self._pubsub_redis = pubsub_redis if pubsub_redis is not None else redis
         self._breaker = breaker
         # Identifies our own messages so we do not act on them.
         self.node_id = node_id or f"{os.uname().nodename}-{uuid.uuid4().hex[:8]}"
@@ -72,10 +77,10 @@ class BreakerGossip:
             pass
 
     async def _listen(self) -> None:
-        assert self._redis is not None
+        assert self._pubsub_redis is not None
         while True:
             try:
-                pubsub = self._redis.pubsub(ignore_subscribe_messages=True)
+                pubsub = self._pubsub_redis.pubsub(ignore_subscribe_messages=True)
                 await pubsub.subscribe(CHANNEL)
                 logx("breaker_gossip_subscribed", node=self.node_id)
                 async for message in pubsub.listen():

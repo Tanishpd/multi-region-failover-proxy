@@ -70,6 +70,21 @@ _REDACT = frozenset(
     {"authorization", "x-api-key", "api_key", "token", "chaos_token", "admin_token", "password"}
 )
 
+# Emitted once per process, so there is no volume to control.
+_LIFECYCLE = frozenset(
+    {
+        "boot",
+        "redis_verified",
+        "redis_refused",
+        "api_keys_loaded",
+        "admin_disabled",
+        "breaker_gossip_subscribed",
+        "config_invalid",
+        "admission_above_pool",
+        "shutdown",
+    }
+)
+
 _sampling = {"rate": 1.0, "client_ip": "raw"}
 
 
@@ -106,7 +121,14 @@ def logx(event: str, level: int = logging.INFO, **fields: Any) -> None:
     # Sample INFO only. WARNING and above always emit: dropping a failure line
     # to save bytes throws away the one record anybody will want, and A13
     # requires >=95% coverage of upstream_failover.
-    if level < logging.WARNING and _sampling["rate"] < 1.0:
+    #
+    # LIFECYCLE events are exempt regardless of level. Sampling exists to bound
+    # volume that scales with TRAFFIC; a once-per-process event has a volume of
+    # one, so sampling it at 1% simply deletes it. The production profile ships
+    # `log_sample_rate=0.01`, and booting it showed zero `boot` and zero
+    # `redis_verified` lines — the very event added to tell an operator whether
+    # Redis answered was silent in the only profile that matters.
+    if event not in _LIFECYCLE and level < logging.WARNING and _sampling["rate"] < 1.0:
         import random
 
         if random.random() > _sampling["rate"]:

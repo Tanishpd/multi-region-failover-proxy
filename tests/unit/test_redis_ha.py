@@ -194,3 +194,46 @@ def test_the_e2e_drill_asserts_the_degradation_actually_happened() -> None:
     body = (ROOT / "ops" / "scripts" / "redis-ha-e2e.sh").read_text()
     assert "no rate_limit_degraded lines" in body
     assert "did not reattach" in body
+
+
+# --- a subscriber is not a hot-path client (found by booting prod) ----------
+
+
+def test_pubsub_does_not_inherit_the_hot_path_read_ceiling() -> None:
+    """Cross-replica gossip had NEVER worked in a real deployment.
+
+    `_TUNING` sets socket_timeout to 50 ms so a sick Redis cannot add latency to
+    a request. `pubsub.listen()` blocks until a message arrives, so on the
+    shared client every subscribe expired within 50 ms — every replica
+    reconnected on a 2-second loop forever and delivered nothing. It was
+    invisible locally because the earlier gossip test built its own client, and
+    only surfaced on booting the production profile and reading its log.
+    """
+    from app.redis_client import _PUBSUB_TUNING, _TUNING
+
+    assert _TUNING["socket_timeout"] == 0.05, "the hot path must stay aggressive"
+    assert _PUBSUB_TUNING["socket_timeout"] is None, "a blocking subscribe cannot have a read cap"
+    # health_check_interval is what actually notices a dead subscriber instead.
+    assert _PUBSUB_TUNING["health_check_interval"] == 30
+
+
+def test_the_gossip_gets_its_own_client() -> None:
+    """SUBSCRIBE waits; PUBLISH is an ordinary fast command. Opposite timeout
+    policies, so they cannot share a client."""
+    main = (ROOT / "proxy" / "app" / "main.py").read_text()
+    assert "pubsub=True," in main
+    assert "BreakerGossip(redis, breaker, pubsub_redis=gossip_redis)" in main
+    # And it must be closed, or a reload leaks a held connection per process.
+    assert "await gossip_redis.aclose()" in main
+
+
+def test_lifecycle_events_are_never_sampled() -> None:
+    """The prod profile ships log_sample_rate=0.01. Booting it produced ZERO
+    `boot` and ZERO `redis_verified` lines — the event added specifically to
+    tell an operator whether Redis answered was silent in the only profile that
+    matters. Sampling bounds volume that scales with TRAFFIC; a once-per-process
+    event has a volume of one."""
+    from app.logging_setup import _LIFECYCLE
+
+    for event in ("boot", "redis_verified", "redis_refused", "api_keys_loaded"):
+        assert event in _LIFECYCLE, f"{event} would be sampled away in production"
