@@ -53,6 +53,12 @@ class _Entry:
     opened_at: float = 0.0
     cooldown_s: float = 5.0
     probe_inflight: bool = False
+    # When the in-flight probe was admitted. A probe that never reports back —
+    # because the task was cancelled, or the caller forgot to record an outcome
+    # — would otherwise hold the single token forever, wedging a recovered
+    # region out of rotation until the process restarts. This is what makes the
+    # token reclaimable.
+    probe_started_at: float = 0.0
     last_code: str = "-"
     transitions: int = 0
 
@@ -64,6 +70,10 @@ class Breaker:
     max_cooldown_s: float = 60.0
     on_open: Callable[[str], Awaitable[None]] | None = None
     clock: Callable[[], float] = time.monotonic
+    # How long a half-open probe may stay outstanding before its token is
+    # reclaimed. Must exceed the total request budget, or a legitimately slow
+    # probe gets a second one admitted alongside it.
+    probe_timeout_s: float = 5.0
     _entries: dict[str, _Entry] = field(default_factory=dict)
 
     def _entry(self, key: str) -> _Entry:
@@ -90,9 +100,24 @@ class Breaker:
         # HALF_OPEN admits exactly ONE probe. Letting every in-flight request
         # through would stampede a region that is still recovering and knock it
         # straight back down.
+        #
+        # But the token must be reclaimable. `record_success`/`record_failure`
+        # are the only things that release it, and neither runs if the request
+        # task is cancelled mid-probe — so a single cancelled probe would pin
+        # the region OUT of rotation permanently, even after it recovered. The
+        # deadline turns that from a wedge into a delay.
+        now = self.clock()
         if entry.probe_inflight:
-            return False, State.HALF_OPEN.value
+            if now - entry.probe_started_at < self.probe_timeout_s:
+                return False, State.HALF_OPEN.value
+            logx(
+                "circuit_probe_expired",
+                level=logging.WARNING,
+                region=key,
+                after_s=round(now - entry.probe_started_at, 1),
+            )
         entry.probe_inflight = True
+        entry.probe_started_at = now
         return True, State.HALF_OPEN.value
 
     def record_success(self, key: str) -> None:

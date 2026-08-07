@@ -78,11 +78,24 @@ class ProxyRequest:
     headers: dict[str, str]
     request_id: str
     client_ip: str
+    # Whether this request may be re-sent after a MAYBE_SENT failure.
+    #
+    # This was hardcoded True, which against a real billed inference API means
+    # every read timeout re-issues to all three regions: three paid generations
+    # and a 503, showing up in the availability dashboard rather than the
+    # billing one. It is now derived from the caller's Idempotency-Key, with the
+    # demo profile keeping the permissive behaviour requirement 4 relies on.
     idempotent: bool = True
+    idempotency_key: str = ""
 
     @classmethod
     async def from_starlette(
-        cls, request: Request, *, max_body: int, read_timeout_s: float = 5.0
+        cls,
+        request: Request,
+        *,
+        max_body: int,
+        read_timeout_s: float = 5.0,
+        replay_maybe_sent: bool = True,
     ) -> ProxyRequest:
         """Read the body ONCE, into memory, under a size cap AND a deadline.
 
@@ -132,6 +145,7 @@ class ProxyRequest:
 
         body = b"".join(chunks)
         headers = {k: v for k, v in request.headers.items() if k.lower() not in _HOP_BY_HOP}
+        key = request.headers.get("idempotency-key", "")
         return cls(
             method=request.method,
             path=request.url.path,
@@ -139,12 +153,20 @@ class ProxyRequest:
             headers=headers,
             request_id=getattr(request.state, "request_id", "-"),
             client_ip=getattr(request.state, "client_ip", "-"),
+            # An explicit key makes replay safe regardless of policy. Without
+            # one, `replay_maybe_sent` decides — permissive in the demo, refuse
+            # in production.
+            idempotent=bool(key) or replay_maybe_sent,
+            idempotency_key=key,
         )
 
     def upstream_headers(self, region_id: str) -> dict[str, str]:
         out = dict(self.headers)
         out["x-request-id"] = self.request_id
         out["x-mrfp-attempt-region"] = region_id
+        # Forwarded so the upstream can dedupe a replay we could not avoid.
+        if self.idempotency_key:
+            out["idempotency-key"] = self.idempotency_key
         return out
 
 
@@ -170,6 +192,23 @@ class ProxyResult:
             region=region,
             attempts=attempts,
             total_ms=total_ms,
+            upstream_headers=passthrough_response_headers(resp.headers),
+        )
+
+    @classmethod
+    def passthrough(cls, resp: httpx.Response, region: str, attempts: list[Attempt]) -> ProxyResult:
+        """Hand an upstream response straight back without treating it as a failure.
+
+        Used for 4xx (the caller is at fault, the region is fine) and for a
+        deliberate load shed, where the upstream's own Retry-After is the most
+        useful thing the client can receive.
+        """
+        return cls(
+            status=resp.status_code,
+            body=resp.content,
+            media_type=resp.headers.get("content-type", "application/json"),
+            region=region,
+            attempts=attempts,
             upstream_headers=passthrough_response_headers(resp.headers),
         )
 

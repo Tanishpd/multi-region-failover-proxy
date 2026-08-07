@@ -1,0 +1,107 @@
+name: ci
+
+on:
+  push: {branches: [main]}
+  pull_request:
+  schedule:
+    # Re-scan the shipped image weekly. The CVE that matters is usually
+    # published AFTER you ship, so a build-time gate alone is not enough.
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    # The suite that must pass with no Docker daemon at all — the same
+    # guarantee `make test-unit` gives a reader locally.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.13"}
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: pytest -q -m unit
+
+  integration:
+    # The Lua token bucket against a REAL Redis. fakeredis would be circular:
+    # the Lua semantics are precisely what is under test.
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7.2-alpine
+        ports: ["6380:6379"]
+        options: --health-cmd "redis-cli ping" --health-interval 3s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.13"}
+      - run: pip install -r requirements-dev.txt
+      - name: seed the test sentinel
+        # The conftest guard refuses to touch a Redis that our own stack did
+        # not seed. That guard exists because a developer machine has a real
+        # Redis one port away.
+        run: redis-cli -h 127.0.0.1 -p 6380 -n 15 SET mrfp:test-guard "ci"
+      - run: pytest -q -m integration
+        env:
+          MRFP_REDIS_URL_TEST: redis://127.0.0.1:6380/15
+
+  chaos:
+    # Categorical assertions only. The graded timing numbers (A4, A5, A11) were
+    # tuned on native arm64; a shared amd64 runner with noisy neighbours would
+    # make a 200 ms threshold flap, and a flaky gate is worse than no gate.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.13"}
+      - run: pip install -r requirements-dev.txt
+      - run: docker compose build
+      - run: docker compose up -d --wait --wait-timeout 120 redis us-east-1-endpoint eu-west-1-endpoint ap-southeast-1-endpoint mrfp-proxy
+        env:
+          MRFP_ADMIN_TOKEN: ci-admin-token
+      - run: docker compose up -d --no-deps redis-sentinel-seed
+      - run: bash ops/scripts/chaos.sh stop-us-east --rps 20 --duration 14
+        env:
+          MRFP_CI: "1"
+      - if: always()
+        run: docker compose logs --no-log-prefix mrfp-proxy | tail -50
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with: {name: chaos-artifacts, path: artifacts/}
+
+  image:
+    needs: [unit, integration]
+    runs-on: ubuntu-latest
+    permissions: {contents: read, packages: write, id-token: write}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ./proxy
+          # Immutable tag. `:dev` is not a deployable artifact — you cannot roll
+          # back to a tag that moves.
+          tags: ghcr.io/${{ github.repository }}/proxy:${{ github.sha }}
+          push: ${{ github.event_name == 'push' }}
+          # SBOM and provenance travel WITH the image digest, rather than as a
+          # build artifact nobody can associate with a running container.
+          sbom: true
+          provenance: mode=max
+      - name: vulnerability gate
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ghcr.io/${{ github.repository }}/proxy:${{ github.sha }}
+          severity: HIGH,CRITICAL
+          # You cannot act on a CVE with no patch; those are surfaced by the
+          # weekly re-scan as an issue rather than blocking a deploy.
+          ignore-unfixed: true
+          exit-code: "1"

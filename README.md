@@ -17,6 +17,12 @@ The mock inference isn't the interesting part. The failure surface is:
 
 Three failure modes, three different code paths, one `except` clause that has to handle all of them.
 
+> **Two profiles.** `demo` (the default) is the graded brief, unchanged and still passing all 11
+> chaos assertions. `prod` ([ADR-021](docs/DECISIONS.md#adr-021)) is the production configuration:
+> breaker on, realistic timeouts, auth required, no pinned container names. `make prod-config`
+> renders it. What production readiness does and does not mean here is stated plainly at the bottom
+> of this file.
+>
 > **Status: complete and measured.** All four brief requirements are implemented, and every scenario
 > in the matrix passes. The documentation was written before the code, deliberately
 > ([ADR-001](docs/DECISIONS.md#adr-001-contract-first)). Every measurement in this repository was
@@ -33,7 +39,7 @@ This project is built to a brief. Each requirement maps to a location frozen in
 | # | Requirement | Lives in | Prove it with |
 |---|---|---|---|
 | 1 | Three containers named `us-east-1-endpoint`, `eu-west-1-endpoint`, `ap-southeast-1-endpoint`, plus Redis | `docker-compose.yml` (`container_name:` on each), `region/app/main.py` | `docker compose ps --format '{{.Name}}'` |
-| 2 | A Redis token bucket, decremented per IP per request, returning 429 at zero | [`token_bucket.lua`](proxy/app/ratelimit/lua/token_bucket.lua) → [`limiter.py`](proxy/app/ratelimit/limiter.py) → [`ratelimit_mw.py`](proxy/app/middleware/ratelimit_mw.py) | a 30-request parallel burst → 21×`200`, 9×`429` |
+| 2 | A Redis token bucket, decremented per IP per request, returning 429 at zero | [`token_bucket.lua`](proxy/app/ratelimit/lua/token_bucket.lua) → [`limiter.py`](proxy/app/ratelimit/limiter.py) → [`context.py`](proxy/app/middleware/context.py) | a 30-request parallel burst → 21×`200`, 9×`429` |
 | 3 | Prioritise `us-east-1`; `httpx` with a ~200 ms timeout; wrapped in `try`/`except` | [`proxy/app/router.py`](proxy/app/router.py) `ResilientRouter.route`, timeout built in [`region_client.py`](proxy/app/region_client.py) `_build` | `make chaos-pause-us-east` → transition p50 ≈ 200 ms |
 | 4 | A script that runs `docker stop us-east-1-endpoint` during a flood; the `except` catches, logs, and routes to `eu-west-1` | [`chaos/run.py`](chaos/run.py), [`docker_ctl.py`](chaos/docker_ctl.py), caught in [`router.py`](proxy/app/router.py), logged as `upstream_failover` | `make chaos` → 11 assertions, exits non-zero on regression |
 
@@ -226,3 +232,33 @@ graceful-shutdown, and architecture traps — is [docs/RUNBOOK.md §7](docs/RUNB
 | [docs/CHAOS-REPORT.md](docs/CHAOS-REPORT.md) | Measured results. Generated, not written. |
 | [docs/LEARNING.md](docs/LEARNING.md) | The concepts, explained: token buckets, timeouts, breakers, chaos — plus the glossary. |
 | [CLAUDE.md](CLAUDE.md) | Context for AI agents working in this repo. |
+
+
+---
+
+## Is it production ready?
+
+Two profiles, and the honest answer differs by which you mean.
+
+**What the `prod` profile gives you.** Bounded memory enforced at boot; overload that sheds instead
+of manufacturing a fake region outage; API-key auth with per-tenant quotas; a control plane that is
+disabled unless configured; secrets absent from `docker inspect`; ~18× less middleware overhead
+([ADR-022](docs/DECISIONS.md#adr-022), measured 473 µs → 25 µs per request); an availability SLI
+that counts every response rather than only the ones the router saw; five alerts that page, each
+with a runbook section whose existence `make docs-check` enforces; a rollable topology with no
+pinned container names; and CI that runs the unit suite with no Docker, the Lua bucket against a
+real Redis, a chaos scenario, and an SBOM-attested CVE-gated image build.
+
+**What it does not give you.** No active health checking — detection stays passive by design, so the
+first request into an outage still pays for it ([ADR-009](docs/DECISIONS.md#adr-009)). No
+cross-replica coordination: breakers and the fallback bucket are per-process, so N replicas means N
+independent detections and, during a Redis outage, N × the documented limit. Redis is a cache with
+no persistence or HA. No streaming — the dominant real use case for a model API — because
+buffer-for-replay and streaming are in direct tension and doing it properly needs a commit-latch
+state machine that has not been built. No response deduplication: a `MAYBE_SENT` request without an
+`Idempotency-Key` is refused rather than replayed. No TLS in the proxy; that terminates at the
+ingress.
+
+**And the regions are still mocks.** Every latency number here describes `blake2b` behind a
+`sleep`. They are honest measurements of this system and meaningless as predictions for real
+inference. The prod profile's 30 s read timeout is a guess until there is real traffic behind it.

@@ -1,5 +1,10 @@
 """Resolve the real client IP. Security-relevant.
 
+The middleware class that used to live here was folded into
+`middleware/context.py`; these functions are the part that mattered and are
+called from there. Keeping them separate keeps this module unit-testable
+without an ASGI scope.
+
 Rate limiting buckets on this value, so "what is the client IP" is a security
 question, not a formatting one.
 
@@ -29,9 +34,6 @@ would grant XFF authority to every container on the network.
 from __future__ import annotations
 
 import ipaddress
-
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
 
 
 def parse_networks(spec: str) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
@@ -87,17 +89,3 @@ def resolve_client_ip(peer: str | None, xff: str | None, trusted: list) -> str:
 
     # Every hop trusted. Fall back to the peer, NOT chain[0].
     return peer_norm
-
-
-class ClientIdentityMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app, trusted_proxies: str) -> None:
-        super().__init__(app)
-        self.trusted = parse_networks(trusted_proxies)
-
-    async def dispatch(self, request: Request, call_next):
-        peer = request.client.host if request.client else None
-        request.state.peer = normalize(peer or "") or "unknown"
-        request.state.client_ip = resolve_client_ip(
-            peer, request.headers.get("x-forwarded-for"), self.trusted
-        )
-        return await call_next(request)

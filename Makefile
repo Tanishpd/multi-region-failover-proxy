@@ -32,7 +32,8 @@ RUFF    := $(VENV)/bin/ruff
 .DEFAULT_GOAL := help
 
 .PHONY: help doctor venv build up up-regions down ps health logs \
-        test-unit test lint fmt docs-check chaos report bench reset clean
+        test-unit test lint fmt docs-check chaos report bench reset clean \
+        prod-config prod-up prod-down
 
 # --- meta -------------------------------------------------------------------
 
@@ -113,3 +114,16 @@ reset:
 
 clean:
 	@bash ops/scripts/clean.sh
+
+# --- production profile ------------------------------------------------------
+# A standalone topology, never merged with docker-compose.yml. See
+# deploy/compose.prod.yml for why an override file cannot express it.
+
+prod-config:
+	@bash ops/scripts/prod.sh config
+
+prod-up:
+	@bash ops/scripts/prod.sh up
+
+prod-down:
+	@bash ops/scripts/prod.sh down

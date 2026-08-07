@@ -1,0 +1,8 @@
+{
+  "_comment": "Example only. Real keys are mounted from a secret, never committed. Generate a key with: python -c \"import secrets,hashlib;k='mrfp_sk_'+secrets.token_urlsafe(32);print('key:',k);print('sha256:',hashlib.sha256(k.encode()).hexdigest())\"",
+  "example-tenant": {
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "capacity": 100,
+    "refill_per_sec": 50
+  }
+}

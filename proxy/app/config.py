@@ -9,7 +9,9 @@ on boot: the resolved values are the only trustworthy record of what is active.
 from __future__ import annotations
 
 from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
+
+from app.profiles import DEMO, PROD, ProfileDefaults, active_profile
 
 
 class BreakerSettings(BaseSettings):
@@ -24,6 +26,31 @@ class Settings(BaseSettings):
         env_nested_delimiter="__",
         extra="ignore",
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Profile presets sit BELOW env, so an explicit variable always wins.
+
+        This ordering is what keeps the graded demo safe: docker-compose.yml
+        pins MRFP_READ_TIMEOUT_MS=200 as an environment variable, so even
+        MRFP_PROFILE=prod against that stack cannot move it.
+        """
+        return (
+            init_settings,
+            env_settings,
+            dotenv_settings,
+            ProfileDefaults(settings_cls),
+            file_secret_settings,
+        )
+
+    profile: str = Field(default_factory=active_profile)
 
     # literal = breaker OFF. Every request walks the priority list and really
     # enters the except block. This is the default and the graded configuration
@@ -59,8 +86,35 @@ class Settings(BaseSettings):
     # to finish it, and starting one only delays the 503.
     min_attempt_ms: int = 60
 
+    # How long a passive failure verdict keeps a region out of /readyz. Without
+    # an expiry, readiness LATCHES: nothing can record a success once traffic
+    # stops arriving, so the pod never returns to service.
+    health_stale_after_s: float = 30.0
+
+    # Whether a deliberate load shed (429, or 503+Retry-After) should fail over.
+    # False is correct in production: moving shed load to a neighbour is how one
+    # region's overload becomes the fleet's. True preserves the brief's demo
+    # behaviour, where a region returning 503 must visibly fail over.
+    failover_on_shed: bool = True
+
+    # 0 means "derive from the smallest per-region connection pool". Admission
+    # above pool capacity turns overload into PoolTimeout, which the router
+    # would otherwise record as a REGION failure — opening a breaker on a region
+    # that was never contacted, and purging its warm pool at peak load.
     max_inflight: int = 128
     max_body_bytes: int = 262_144
+
+    # Responses are buffered so they can be handed back after failover, so they
+    # need the same ceiling the request side has.
+    max_response_bytes: int = 8 * 1024 * 1024
+
+    # How many regions to attempt. The demo walks all three (requirement 3);
+    # production stops at two, because a third 31s attempt helps nobody.
+    region_attempt_limit: int = 3
+
+    # Replay a request that MAY have reached the upstream? Against a billed API
+    # this is a double charge, so production requires an Idempotency-Key.
+    replay_maybe_sent: bool = True
 
     # An admission slot is held while the body is read, so an unbounded read is
     # a slot held forever. This bounds it.
@@ -85,6 +139,20 @@ class Settings(BaseSettings):
     rl_fail_mode: str = "open"  # open | closed
 
     log_level: str = "INFO"
+    # Fraction of SUCCESSFUL requests logged. Failures and failovers are always
+    # logged regardless — they are the reason the log exists, and assertion A13
+    # counts them.
+    log_sample_rate: float = 1.0
+    # raw | hashed | none. A client IP is personal data in most jurisdictions.
+    log_client_ip: str = "raw"
+
+    # off | optional | required. `optional` authenticates when a key is present
+    # and falls back to IP identity when it is not, which is how the brief's
+    # anonymous 429 demo keeps working alongside real auth.
+    auth_mode: str = "off"
+    api_keys_file: str = ""
+
+    graceful_shutdown_s: int = 5
     chaos_mode: int = 0
     chaos_token: str = ""
 
@@ -131,6 +199,36 @@ class Settings(BaseSettings):
             problems.append(
                 "MRFP_CHAOS_MODE=1 requires an explicit MRFP_CHAOS_TOKEN. The bypass header "
                 "skips rate limiting entirely and must never be armed with a default."
+            )
+
+        if self.profile not in {DEMO, PROD}:
+            problems.append(f"MRFP_PROFILE={self.profile!r} is not {DEMO!r} or {PROD!r}")
+
+        if self.auth_mode not in {"off", "optional", "required"}:
+            problems.append(f"MRFP_AUTH_MODE={self.auth_mode!r} is not off/optional/required")
+
+        if self.auth_mode != "off" and not self.api_keys_file:
+            problems.append(
+                f"MRFP_AUTH_MODE={self.auth_mode!r} requires MRFP_API_KEYS_FILE. Refusing to "
+                "claim authentication with no key store."
+            )
+
+        if self.log_client_ip not in {"raw", "hashed", "none"}:
+            problems.append(f"MRFP_LOG_CLIENT_IP={self.log_client_ip!r} is not raw/hashed/none")
+
+        if not 0.0 <= self.log_sample_rate <= 1.0:
+            problems.append(f"MRFP_LOG_SAMPLE_RATE={self.log_sample_rate} is not in [0, 1]")
+
+        if self.region_attempt_limit < 1:
+            problems.append(f"MRFP_REGION_ATTEMPT_LIMIT={self.region_attempt_limit} must be >= 1")
+
+        if self.profile == PROD and self.trusted_proxies.strip() in {
+            "",
+            "127.0.0.1/32,::1/128",
+        }:
+            problems.append(
+                "the prod profile requires MRFP_TRUSTED_PROXIES to name the REAL ingress address. "
+                "Loopback-only means every client shares one rate-limit bucket."
             )
 
         if self.rl_capacity < 1 or self.rl_refill_per_sec <= 0:

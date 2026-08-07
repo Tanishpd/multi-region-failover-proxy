@@ -63,14 +63,34 @@ class TokenBucketLimiter:
         self._recoveries_seen = 0
 
     @staticmethod
-    def bucket_key(identity: str, layer: str = "burst") -> str:
+    def bucket_key(identity: str, layer: str = "burst", dimension: str = "ip") -> str:
         # The braces are a Redis hash tag: everything inside determines the
         # slot, so all of one client's layers land together and a multi-key
         # script stays legal if this ever moves to Cluster.
-        return f"rl:v1:{{ip:{identity}}}:{layer}"
+        #
+        # `dimension` is ip or key. An authenticated tenant gets its own bucket
+        # keyed on the tenant, so its quota follows the account rather than
+        # whatever address it happens to call from.
+        return f"rl:v1:{{{dimension}:{identity}}}:{layer}"
 
-    async def check(self, identity: str, *, cost: int = 1, mode: str = "consume") -> Decision:
-        key = self.bucket_key(identity)
+    async def check(
+        self,
+        identity: str,
+        *,
+        cost: int = 1,
+        mode: str = "consume",
+        dimension: str = "ip",
+        capacity: int | None = None,
+        refill_per_sec: float | None = None,
+    ) -> Decision:
+        """Per-principal limits when the caller is authenticated.
+
+        capacity/refill default to the global configuration, so an anonymous
+        caller behaves exactly as before and requirement 2 still demonstrates.
+        """
+        key = self.bucket_key(identity, dimension=dimension)
+        cap = capacity if capacity is not None else self.capacity
+        rate = refill_per_sec if refill_per_sec is not None else self.refill_per_sec
 
         if self.redis is not None and (self.breaker is None or self.breaker.allow("redis")[0]):
             try:
@@ -79,7 +99,7 @@ class TokenBucketLimiter:
                 reply = await asyncio.wait_for(
                     self.script(
                         [key],
-                        [mode, cost, 0, self.capacity, self.refill_per_sec, self.ttl_pad_ms],
+                        [mode, cost, 0, cap, rate, self.ttl_pad_ms],
                     ),
                     timeout=REDIS_CALL_TIMEOUT_S,
                 )

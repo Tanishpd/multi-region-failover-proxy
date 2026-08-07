@@ -23,6 +23,7 @@ async def infer(request: Request) -> Response:
     # unbounded memory commitment in a 256M container, so shed early and
     # cheaply rather than OOM under total-blackout. (ADR-006)
     if state.admission.locked():
+        metrics.ADMISSION_REJECTED.inc()
         logx("admission_rejected", level=logging.WARNING)
         return problem(
             503,
@@ -33,11 +34,13 @@ async def infer(request: Request) -> Response:
         )
 
     async with state.admission:
+        metrics.ADMISSION_INFLIGHT.inc()
         try:
             req = await ProxyRequest.from_starlette(
                 request,
                 max_body=state.settings.max_body_bytes,
                 read_timeout_s=state.settings.body_read_timeout_s,
+                replay_maybe_sent=state.settings.replay_maybe_sent,
             )
         except ValueError as e:
             # Covers three cases, all client-caused: Content-Length over the
@@ -48,7 +51,30 @@ async def infer(request: Request) -> Response:
             logx("request_rejected", level=logging.WARNING, status=status, detail=detail)
             return problem(status, "body-rejected", title, detail)
 
-        result: ProxyResult = await state.router.route(req)
+        try:
+            result: ProxyResult = await state.router.route(req)
+        finally:
+            metrics.ADMISSION_INFLIGHT.dec()
+
+        if len(result.body) > state.settings.max_response_bytes:
+            # The request side has a cap; the response side needs the same one.
+            # A buffered response is held in memory for the whole request, so an
+            # upstream returning something enormous is the same OOM the request
+            # cap exists to prevent, arriving from the other direction.
+            logx(
+                "response_too_large",
+                level=logging.ERROR,
+                region=result.region,
+                bytes=len(result.body),
+                cap=state.settings.max_response_bytes,
+            )
+            return problem(
+                502,
+                "upstream-response-too-large",
+                "Upstream response too large",
+                f"{result.region} returned {len(result.body)} bytes, over the "
+                f"{state.settings.max_response_bytes} byte cap.",
+            )
         return result.to_response(primary_region=state.primary_region)
 
 

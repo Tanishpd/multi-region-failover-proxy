@@ -63,6 +63,39 @@ def configure(level: str = "INFO") -> None:
 
 _log = logging.getLogger("mrfp")
 
+# Field names whose values must never appear in a log line. Redaction is by
+# NAME here; `logx` never receives a raw header map, and the proxy does not log
+# request headers anywhere — which is what keeps Authorization out.
+_REDACT = frozenset(
+    {"authorization", "x-api-key", "api_key", "token", "chaos_token", "admin_token", "password"}
+)
+
+_sampling = {"rate": 1.0, "client_ip": "raw"}
+
+
+def configure_policy(*, log_sample_rate: float = 1.0, log_client_ip: str = "raw") -> None:
+    """Sampling and PII policy.
+
+    At 10k rps one line per request is roughly 216 GB/day/pod. Successes are
+    sampled; failures and failovers never are — they are the reason the log
+    exists, and chaos assertion A13 counts `upstream_failover` lines and would
+    fail if any were dropped.
+    """
+    _sampling["rate"] = log_sample_rate
+    _sampling["client_ip"] = log_client_ip
+
+
+def scrub_ip(value: str) -> str:
+    """A client IP is personal data in most jurisdictions."""
+    policy = _sampling["client_ip"]
+    if policy == "none":
+        return "-"
+    if policy == "hashed":
+        import hashlib
+
+        return "ip_" + hashlib.sha256(value.encode()).hexdigest()[:16]
+    return value
+
 
 def logx(event: str, level: int = logging.INFO, **fields: Any) -> None:
     """Emit a structured event. Never f-string a log message.
@@ -70,4 +103,20 @@ def logx(event: str, level: int = logging.INFO, **fields: Any) -> None:
     `event` is a closed-vocabulary key, not a sentence: it is used as a metric
     label and grepped by the chaos assertions.
     """
+    # Sample INFO only. WARNING and above always emit: dropping a failure line
+    # to save bytes throws away the one record anybody will want, and A13
+    # requires >=95% coverage of upstream_failover.
+    if level < logging.WARNING and _sampling["rate"] < 1.0:
+        import random
+
+        if random.random() > _sampling["rate"]:
+            return
+
+    for name in list(fields):
+        if name.lower() in _REDACT:
+            fields[name] = "[redacted]"
+    for name in ("client_ip", "identity", "peer"):
+        if name in fields and isinstance(fields[name], str):
+            fields[name] = scrub_ip(fields[name])
+
     _log.log(level, event, extra={"event": event, **fields})

@@ -34,6 +34,13 @@ from enum import Enum
 
 import httpx
 
+# Codes that describe THIS PROCESS being saturated, not the region being
+# unhealthy. Feeding these to the breaker creates a feedback loop that turns
+# load into a fake outage: overload -> PoolTimeout -> breaker opens on a region
+# that was never contacted -> its warm pool is purged at peak load -> the
+# remaining regions absorb the traffic and follow.
+SELF_INFLICTED = frozenset({"pool_timeout", "attempt_deadline"})
+
 
 class FailureClass(str, Enum):
     """Did the request reach the server?

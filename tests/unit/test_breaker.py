@@ -159,3 +159,34 @@ def test_on_open_without_a_running_loop_does_not_raise(clock) -> None:
     b = Breaker(failure_threshold=1, clock=clock, on_open=purge)
     b.record_failure("us-east-1")  # must not raise
     assert b.state_name("us-east-1") == "open"
+
+
+def test_expired_probe_token_is_reclaimed(breaker, clock) -> None:
+    """A probe that never reports back must not wedge the region forever.
+
+    record_success/record_failure are the only things that release the token,
+    and neither runs if the request task is cancelled mid-probe. Without a
+    deadline, one cancelled probe pins a RECOVERED region out of rotation until
+    the process restarts.
+    """
+    for _ in range(3):
+        breaker.record_failure("us-east-1")
+    clock.advance(6)
+
+    assert breaker.allow("us-east-1") == (True, "half_open")
+    # The probe vanishes — cancelled, or the caller forgot to record an outcome.
+    assert breaker.allow("us-east-1") == (False, "half_open")
+
+    clock.advance(breaker.probe_timeout_s + 0.1)
+    assert breaker.allow("us-east-1") == (True, "half_open"), "token was never reclaimed"
+
+
+def test_a_slow_probe_is_not_prematurely_duplicated(breaker, clock) -> None:
+    """The deadline must exceed a legitimately slow request, or two probes race."""
+    for _ in range(3):
+        breaker.record_failure("us-east-1")
+    clock.advance(6)
+    breaker.allow("us-east-1")
+
+    clock.advance(breaker.probe_timeout_s - 0.1)
+    assert breaker.allow("us-east-1") == (False, "half_open")

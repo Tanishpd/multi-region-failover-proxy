@@ -37,7 +37,13 @@ import httpx
 
 from app import metrics
 from app.config import Settings
-from app.failures import FailureClass, UpstreamStatusError, classify, is_replayable
+from app.failures import (
+    SELF_INFLICTED,
+    FailureClass,
+    UpstreamStatusError,
+    classify,
+    is_replayable,
+)
 from app.logging_setup import logx
 from app.region_client import RegionClient
 from app.regions import RegionRegistry
@@ -83,15 +89,30 @@ class ResilientRouter:
     def usable_regions(self) -> list[str]:
         """Regions not currently known to be broken. Feeds /readyz.
 
-        Unknown counts as usable — with passive detection, the only way to learn
-        is to try, so refusing traffic on absence of evidence would be a
-        self-fulfilling outage.
+        Two rules, both there to avoid a self-inflicted outage:
+
+        Unknown counts as usable. With passive detection the only way to learn
+        is to try, so refusing traffic on absence of evidence would be
+        self-fulfilling.
+
+        A failure verdict EXPIRES. Without that, `/readyz` latches: a brief
+        partition marks all three regions bad, readiness goes 503, an
+        orchestrator pulls the pod out of service, no data-plane traffic can
+        reach it, so nothing can ever record a success — and it stays out
+        forever while `/healthz` reports 200. The staleness window turns a latch
+        into a delay.
+
+        Deliberately does NOT consult breaker.allow(): that call is stateful
+        (it flips OPEN to HALF_OPEN and claims the single probe token), so a
+        readiness poll would consume probes meant for real traffic.
         """
+        now = time.time()
         out = []
         for spec in self.registry.ordered():
-            if self.health[spec.id].ok is False:
+            health = self.health[spec.id]
+            if health.ok is False and (now - health.at) < self.s.health_stale_after_s:
                 continue
-            if self.breaker is not None and not self.breaker.allow(spec.id)[0]:  # type: ignore[attr-defined]
+            if self.breaker is not None and self.breaker.state_name(spec.id) == "open":
                 continue
             out.append(spec.id)
         return out
@@ -101,7 +122,7 @@ class ResilientRouter:
         deadline = t_start + self.s.total_budget_ms / 1000
         attempts: list[Attempt] = []
 
-        for spec in self.registry.ordered():
+        for spec in self.registry.ordered()[: self.s.region_attempt_limit]:
             remaining = deadline - time.perf_counter()
             if remaining < self.s.min_attempt_ms / 1000:
                 attempts.append(Attempt(spec.id, "budget_exhausted", 0.0, sent=False))
@@ -143,6 +164,25 @@ class ResilientRouter:
                     )
 
                 if resp.status_code >= 500 or resp.status_code == 429:
+                    # A shed response (429, or a 503 with Retry-After) means the
+                    # region is ALIVE and deliberately protecting itself. Moving
+                    # that load to a neighbour is how one region's overload
+                    # becomes the whole fleet's: eu-west-1 absorbs us-east-1's
+                    # shed traffic on top of its own, tips, and exports the sum
+                    # to ap-southeast-1. Honour the shed instead of amplifying
+                    # it — unless nothing else has been tried yet.
+                    if self._is_load_shed(resp) and not self.s.failover_on_shed:
+                        self._record_success(spec.id)  # alive, just full
+                        metrics.REQUESTS.labels(spec.id, str(resp.status_code)).inc()
+                        attempts.append(Attempt(spec.id, f"shed_{resp.status_code}", _ms_since(t0)))
+                        logx(
+                            "upstream_shed",
+                            level=logging.WARNING,
+                            region=spec.id,
+                            status=resp.status_code,
+                            retry_after=resp.headers.get("retry-after"),
+                        )
+                        return ProxyResult.passthrough(resp, spec.id, attempts)
                     raise UpstreamStatusError(resp.status_code, resp)
 
                 # 4xx: the region is alive, the caller is at fault. Pass it
@@ -219,6 +259,18 @@ class ResilientRouter:
         )
         return result
 
+    @staticmethod
+    def _is_load_shed(resp) -> bool:
+        """Did the region deliberately shed this, rather than fail?
+
+        429 always. 503 only WITH Retry-After — a bare 503 is usually a broken
+        upstream, which is exactly what we should fail over from, while
+        503 + Retry-After is a considered "I am full, come back".
+        """
+        if resp.status_code == 429:
+            return True
+        return resp.status_code == 503 and "retry-after" in resp.headers
+
     def _record_success(self, region_id: str) -> None:
         self.health[region_id] = RegionHealth(ok=True, code="ok", at=time.time())
         metrics.observe_health(region_id, True)
@@ -226,6 +278,16 @@ class ResilientRouter:
             self.breaker.record_success(region_id)  # type: ignore[attr-defined]
 
     def _record_failure(self, region_id: str, code: str) -> None:
+        """Record a region failure — unless the failure was ours.
+
+        A PoolTimeout means WE ran out of connections; the region was never
+        contacted and has done nothing wrong. Recording it would open a breaker
+        on a healthy region and purge its warm pool at exactly peak load, which
+        converts an overload into a self-inflicted multi-region outage.
+        """
+        if code in SELF_INFLICTED:
+            logx("self_inflicted_failure", level=logging.WARNING, region=region_id, code=code)
+            return
         self.health[region_id] = RegionHealth(ok=False, code=code, at=time.time())
         metrics.observe_health(region_id, False)
         if self.breaker is not None:

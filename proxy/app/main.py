@@ -18,12 +18,11 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 
 from app import api
+from app.auth import KeyStore
 from app.breaker import Breaker
 from app.config import settings
-from app.logging_setup import configure, logx
-from app.middleware.client_identity import ClientIdentityMiddleware
-from app.middleware.ratelimit_mw import RateLimitMiddleware
-from app.middleware.request_id import RequestIdMiddleware
+from app.logging_setup import configure, configure_policy, logx
+from app.middleware.context import ContextMiddleware
 from app.ratelimit.limiter import TokenBucketLimiter
 from app.redis_client import build_redis
 from app.region_client import RegionClient
@@ -34,6 +33,10 @@ from app.router import ResilientRouter
 @asynccontextmanager
 async def lifespan(app: Starlette):
     configure(settings.log_level)
+    configure_policy(
+        log_sample_rate=settings.log_sample_rate,
+        log_client_ip=settings.log_client_ip,
+    )
 
     # A wrong MRFP_ prefix is silently ignored by pydantic-settings, so the
     # resolved values are the only trustworthy record of what is actually
@@ -103,6 +106,12 @@ async def lifespan(app: Starlette):
             on_open=_purge,
         )
 
+    key_store = None
+    if settings.auth_mode != "off":
+        key_store = KeyStore(settings.api_keys_file)
+        loaded = key_store.load()
+        logx("api_keys_loaded", count=loaded, mode=settings.auth_mode)
+
     redis = build_redis(settings.redis_url) if settings.redis_url else None
     limiter = TokenBucketLimiter(
         redis,
@@ -118,7 +127,23 @@ async def lifespan(app: Starlette):
     app.state.clients = clients
     app.state.redis = redis
     app.state.limiter = limiter
-    app.state.admission = asyncio.Semaphore(settings.max_inflight)
+    app.state.key_store = key_store
+    # Admission must never exceed the SMALLEST per-region connection pool.
+    # Above it, overload becomes PoolTimeout, which used to be recorded as a
+    # region failure — opening a breaker on a region that was never contacted.
+    # 0 means "derive it", which is what the prod profile asks for.
+    smallest_pool = min(spec.max_connections for spec in registry.ordered())
+    inflight = settings.max_inflight or max(1, int(smallest_pool * 0.75))
+    if inflight > smallest_pool:
+        logx(
+            "admission_above_pool",
+            level=logging.WARNING,
+            max_inflight=inflight,
+            smallest_pool=smallest_pool,
+            detail="overload will surface as PoolTimeout rather than a clean shed",
+        )
+    app.state.admission = asyncio.Semaphore(inflight)
+    app.state.max_inflight = inflight
     app.state.primary_region = registry.ordered()[0].id
     app.state.router = ResilientRouter(registry, clients, settings, breaker=breaker)
 
@@ -177,20 +202,20 @@ def create_app() -> Starlette:
         exception_handlers={404: api.not_found, 500: api.server_error},
     )
 
-    # REVERSE of execution order — add_middleware PREPENDS, so the last one
-    # registered is outermost. Execution is:
-    #   RequestId (outermost) -> ClientIdentity -> RateLimit -> route
+    # ONE pure-ASGI layer doing request-id, client identity, rate limiting and
+    # response telemetry. Three stacked BaseHTTPMiddleware layers measured
+    # ~530 us/req against ~110 us for this; each one wraps the call in an anyio
+    # task group and pumps the response through a memory stream.
     #
-    # Getting this backwards would put the router outside the limiter, so 429s
-    # would be attributed to us-east-1 in the metrics and request_id would be
-    # unset when the 429 body is built.
+    # The middleware-ordering trap the three layers had is gone with them:
+    # ordering is now explicit statements inside one __call__, not an implicit
+    # consequence of add_middleware prepending.
     app.add_middleware(
-        RateLimitMiddleware,
+        ContextMiddleware,
+        trusted_proxies=settings.trusted_proxies,
         chaos_mode=bool(settings.chaos_mode),
         chaos_token=settings.chaos_token,
     )
-    app.add_middleware(ClientIdentityMiddleware, trusted_proxies=settings.trusted_proxies)
-    app.add_middleware(RequestIdMiddleware)
     return app
 
 

@@ -15,6 +15,37 @@ from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, gene
 
 REGISTRY = CollectorRegistry()
 
+# Incremented in the OUTERMOST middleware, so it sees every terminal status —
+# including the 429s, 413s, 408s, 404s and 500s that never reach the router.
+# proxy_requests_total below is router-scoped and therefore blind to all of
+# them; every availability SLI must be computed from THIS one.
+HTTP_RESPONSES = Counter(
+    "proxy_http_responses_total",
+    "Every response the client received, by route, status and client-visible outcome.",
+    ["route", "status", "outcome"],
+    registry=REGISTRY,
+)
+
+POOL_WAITERS = Gauge(
+    "proxy_region_pool_waiters",
+    "Requests queued for a connection, per region. The LEADING indicator of the "
+    "overload -> PoolTimeout -> breaker-opens-on-a-healthy-region feedback loop.",
+    ["region"],
+    registry=REGISTRY,
+)
+
+ADMISSION_INFLIGHT = Gauge(
+    "proxy_admission_inflight",
+    "Requests currently holding an admission slot.",
+    registry=REGISTRY,
+)
+
+ADMISSION_REJECTED = Counter(
+    "proxy_admission_rejected_total",
+    "Requests shed at the admission gate before any upstream work.",
+    registry=REGISTRY,
+)
+
 REQUESTS = Counter(
     "proxy_requests_total",
     "Requests served, by serving region and status class.",

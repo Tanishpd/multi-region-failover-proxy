@@ -1,0 +1,131 @@
+# Production topology. A STANDALONE file, never `-f base -f override`.
+#
+# Compose merge can add and replace keys but it cannot DELETE them, and the two
+# keys production must not have are exactly the ones the demo depends on:
+#
+#   container_name:  pinned so the brief's `docker stop us-east-1-endpoint`
+#                    works verbatim — and it forbids deploy.replicas and any
+#                    rolling replacement.
+#   ports:           merges by append with a uniqueness constraint, so an
+#                    override cannot un-publish 9001-9003.
+#
+# An override file is structurally incapable of expressing this topology, which
+# is why it is a separate file. tests/unit/test_compose_drift.py asserts the
+# shared keys stay in step across the two.
+#
+# Run with:  docker compose -f deploy/compose.prod.yml up -d
+name: mrfp-prod
+
+x-region: &region
+  build: {context: ../region}
+  image: ${MRFP_REGION_IMAGE:-mrfp/region:dev}
+  env_file: [../region/region.env]
+  networks: [mrfp-net]
+  restart: unless-stopped
+  stop_grace_period: 30s
+  mem_limit: 512m
+  # No container_name, no published ports — the ingress reaches these by
+  # service name on the internal network.
+  security_opt: [no-new-privileges:true]
+  cap_drop: [ALL]
+  read_only: true
+  tmpfs: [/tmp]
+
+services:
+  proxy:
+    build: {context: ../proxy}
+    image: ${MRFP_PROXY_IMAGE:-mrfp/proxy:dev}
+    networks: [mrfp-net]
+    restart: unless-stopped
+    # Long enough for in-flight inference to drain after /admin/drain flips
+    # readiness and the ingress stops sending new work.
+    stop_grace_period: 45s
+    deploy:
+      replicas: ${MRFP_REPLICAS:-3}
+      update_config: {order: start-first, failure_action: rollback, delay: 10s}
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
+    mem_limit: 1g
+    volumes:
+      - ../config:/config:ro
+      - ${MRFP_API_KEYS_FILE:-./keys.example.json}:/secrets/keys.json:ro
+    environment:
+      MRFP_PROFILE: prod
+      MRFP_REDIS_URL: ${MRFP_REDIS_URL:?set MRFP_REDIS_URL}
+      MRFP_REGIONS_FILE: /config/regions.yaml
+      # MUST name the real ingress. The prod profile refuses to boot on
+      # loopback-only, because that means every client shares one bucket.
+      MRFP_TRUSTED_PROXIES: ${MRFP_TRUSTED_PROXIES:?set the ingress CIDR}
+      MRFP_ADMIN_TOKEN: ${MRFP_ADMIN_TOKEN:?set an admin token}
+      MRFP_API_KEYS_FILE: /secrets/keys.json
+      MRFP_LOG_LEVEL: ${MRFP_LOG_LEVEL:-INFO}
+    healthcheck:
+      # Liveness only. NEVER /readyz here: every replica sees the same three
+      # regions, so a real upstream outage would fail every container's health
+      # check simultaneously and take the whole fleet down — converting a
+      # degraded-but-serving service into zero endpoints.
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys;sys.exit(0) if urllib.request.urlopen('http://127.0.0.1:8000/healthz',timeout=2).status==200 else sys.exit(1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  us-east-1-endpoint:
+    <<: *region
+    environment:
+      MRFP_REGION_ID: us-east-1
+      MRFP_REGION_ZONE: us-east-1a
+      MRFP_BASE_LATENCY_MS: "15"
+      MRFP_JITTER_MS: "5"
+
+  eu-west-1-endpoint:
+    <<: *region
+    environment:
+      MRFP_REGION_ID: eu-west-1
+      MRFP_REGION_ZONE: eu-west-1b
+      MRFP_BASE_LATENCY_MS: "60"
+      MRFP_JITTER_MS: "10"
+
+  ap-southeast-1-endpoint:
+    <<: *region
+    environment:
+      MRFP_REGION_ID: ap-southeast-1
+      MRFP_REGION_ZONE: ap-southeast-1c
+      MRFP_BASE_LATENCY_MS: "150"
+      MRFP_JITTER_MS: "20"
+
+  redis:
+    image: redis:7.2-alpine
+    networks: [mrfp-net]
+    restart: unless-stopped
+    # Not published to the host at all. In the demo stack it is on 127.0.0.1:6380
+    # for `redis-cli` experiments; in production nothing outside the network
+    # should be able to reach it.
+    command: >
+      redis-server
+      --requirepass ${MRFP_REDIS_PASSWORD:?set a redis password}
+      --save ""
+      --appendonly no
+      --maxmemory ${MRFP_REDIS_MAXMEMORY:-512mb}
+      --maxmemory-policy volatile-ttl
+    healthcheck:
+      test: ["CMD", "sh", "-c", "redis-cli -a \"$$MRFP_REDIS_PASSWORD\" ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    environment:
+      MRFP_REDIS_PASSWORD: ${MRFP_REDIS_PASSWORD}
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    user: "999:1000"
+    mem_limit: 640m
+
+networks:
+  mrfp-net:
+    driver: bridge

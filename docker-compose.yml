@@ -47,6 +47,7 @@ services:
       # change does not need an image rebuild.
       - ./config:/config:ro
     environment:
+      MRFP_PROFILE: "${MRFP_PROFILE:-demo}"
       MRFP_MODE: "${MRFP_MODE:-literal}"
       MRFP_REDIS_URL: redis://redis:6379/0
       MRFP_REGIONS_FILE: /config/regions.yaml

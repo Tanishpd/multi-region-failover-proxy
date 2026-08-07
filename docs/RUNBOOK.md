@@ -192,3 +192,74 @@ This machine runs a **real Redis on 6379** with real data. Guardrails:
 The chaos harness pushes an inverse action onto an undo stack for every container it touches, drained
 in a `finally` block and on SIGINT — Ctrl-C cannot leave a region stopped or paused. If it ever does,
 `make up` restores everything.
+
+
+---
+
+## 9. Alerts
+
+Five alerts page; everything else is a ticket. Each has a section here — and
+`make docs-check` fails if an alert has no matching anchor, because an alert
+that wakes someone and then tells them nothing is worse than no alert.
+
+Rules live in `ops/observability/rules/slo.yml`.
+
+### alert-MRFPAvailabilityFastBurn
+
+Clients are getting 5xx from `/v1/infer` fast enough to exhaust a 30-day error
+budget in about two days.
+
+1. `curl -s localhost:8000/readyz | jq` — which regions does the proxy believe
+   are usable? If none, this is an upstream outage, not a proxy problem.
+2. `docker compose logs --no-log-prefix mrfp-proxy | jq -c 'select(.event=="all_regions_down")' | tail`
+   — the `X-Failover-Path` in each shows what every region did.
+3. If one region is dragging, remove it: set `MRFP_REGION_PRIORITY` to the
+   remaining two and roll. Failover cannot help when every region is failing.
+
+### alert-MRFPAvailabilitySlowBurn
+
+Same signal, slower. Not an emergency; find the pattern before mitigating.
+Check whether the failures correlate with one region, one tenant, or one
+deploy — `proxy_http_responses_total` is labelled by outcome, and the structured
+log carries `request_id` for joins.
+
+### alert-MRFPSelfInflictedSaturation
+
+**The proxy is the problem, not the regions.** `pool_timeout` and
+`attempt_deadline` cannot be produced by a region outage; they are generated in
+this process when it runs out of connections or its own deadline fires.
+
+1. `curl -s localhost:8000/metrics | grep -E 'admission_inflight|pool_waiters'`
+2. If `proxy_admission_inflight` is pinned at the limit, you are load-shedding
+   correctly and need more replicas.
+3. If `proxy_region_pool_waiters` is positive while admission has headroom, the
+   per-region pool is the bottleneck — raise `client_defaults.max_connections`
+   in `config/regions.yaml`.
+4. **Do not** conclude a region is down. The breaker deliberately ignores these
+   codes for exactly this reason; if you see a breaker open at the same time,
+   something reintroduced the feedback loop.
+
+### alert-MRFPFailoverNotHappening
+
+The primary is failing and nothing is failing over — the mechanism this whole
+system exists for has regressed.
+
+1. Which mode? `curl -s -H "Authorization: Bearer $MRFP_ADMIN_TOKEN" localhost:8000/admin/regions | jq .mode`
+2. In `resilient` mode, check whether breakers are open on every region: that
+   is not a failure to fail over, it is nothing left to fail over to.
+3. `grep -c upstream_failover` in the proxy logs. Zero with a failing primary
+   means the except block is being bypassed — the exact regression chaos
+   assertion A13 guards against. Run `make chaos` to reproduce.
+
+### alert-MRFPMetricsAbsent
+
+The scrape is gone, so every other rule silently stopped evaluating. Treat as
+an outage of your ability to detect outages. Check the proxy is up
+(`/healthz`), that `MRFP_METRICS_PUBLIC` was not set to `0` without giving the
+scraper a token, and that the scrape target still resolves.
+
+### alert-MRFPPoolQueueing
+
+Leading indicator, ticket severity. Requests are waiting for a connection but
+nothing has timed out yet. Scale out, or raise the per-region pool, before this
+becomes `MRFPSelfInflictedSaturation`.

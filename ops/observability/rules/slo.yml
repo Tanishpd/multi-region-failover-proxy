@@ -1,0 +1,95 @@
+# SLIs and the five alerts that page. Everything else is a ticket.
+#
+# An on-call rotation receiving more than a handful of distinct pages stops
+# reading them, and then the SLO is decorative.
+#
+# Every rule below reads proxy_http_responses_total, NOT proxy_requests_total.
+# The latter is incremented inside the router and is therefore blind to every
+# 429, 413, 408, 404 and shed 503 — i.e. blind to most of the ways a client
+# actually has a bad time.
+groups:
+  - name: mrfp-sli
+    interval: 30s
+    rules:
+      # Availability as the CLIENT experiences it. rate_limited and
+      # client_error are excluded from the denominator: an abusive caller must
+      # not be able to burn your error budget. internal_error and
+      # all_regions_down are NOT excluded — those are ours.
+      - record: mrfp:availability_bad:ratio5m
+        expr: |
+          sum(rate(proxy_http_responses_total{route="/v1/infer",
+              outcome=~"all_regions_down|internal_error"}[5m]))
+          / clamp_min(sum(rate(proxy_http_responses_total{route="/v1/infer",
+              outcome=~"served_.*|all_regions_down|internal_error"}[5m])), 1e-9)
+
+      # The SLI unique to this system: GIVEN the primary failed, did the client
+      # still get an answer? This is what the whole proxy exists to guarantee.
+      - record: mrfp:failover_bad:ratio5m
+        expr: |
+          sum(rate(proxy_http_responses_total{outcome="all_regions_down"}[5m]))
+          / clamp_min(sum(rate(proxy_http_responses_total{
+              outcome=~"served_failover|all_regions_down"}[5m])), 1e-9)
+
+      # Burn-rate maths is meaningless at 2 rps: one error is 50%. Every page
+      # below is gated on this floor.
+      - record: mrfp:qps5m
+        expr: sum(rate(proxy_http_responses_total{route="/v1/infer"}[5m]))
+
+  - name: mrfp-alerts
+    rules:
+      - alert: MRFPAvailabilityFastBurn
+        expr: mrfp:availability_bad:ratio5m > 0.0144 and mrfp:qps5m > 5
+        for: 2m
+        labels: {severity: page}
+        annotations:
+          runbook: docs/RUNBOOK.md#alert-mrfpavailabilityfastburn
+          summary: Burning the 30-day error budget 14.4x faster than sustainable.
+
+      - alert: MRFPAvailabilitySlowBurn
+        expr: mrfp:availability_bad:ratio5m > 0.006 and mrfp:qps5m > 5
+        for: 30m
+        labels: {severity: page}
+        annotations:
+          runbook: docs/RUNBOOK.md#alert-mrfpavailabilityslowburn
+          summary: Sustained error-budget burn.
+
+      # The highest-signal alert here. pool_timeout and attempt_deadline are
+      # the only two codes in the CONTRACT section 8 vocabulary that a region
+      # outage physically cannot produce — they are generated inside this
+      # process. Nearly false-positive-free by construction.
+      - alert: MRFPSelfInflictedSaturation
+        expr: sum(rate(proxy_attempt_failed_total{code=~"pool_timeout|attempt_deadline"}[5m])) > 0
+        for: 2m
+        labels: {severity: page}
+        annotations:
+          runbook: docs/RUNBOOK.md#alert-mrfpselfinflictedsaturation
+          summary: The proxy is saturating itself, not failing over.
+
+      - alert: MRFPFailoverNotHappening
+        expr: |
+          sum(rate(proxy_attempt_failed_total{region="us-east-1"}[5m])) > 0
+          and sum(rate(proxy_failover_total[5m])) == 0
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          runbook: docs/RUNBOOK.md#alert-mrfpfailovernothappening
+          summary: The primary is failing but nothing is failing over.
+
+      - alert: MRFPMetricsAbsent
+        expr: absent(proxy_http_responses_total)
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          runbook: docs/RUNBOOK.md#alert-mrfpmetricsabsent
+          summary: Scrape is dead; every rule above stopped evaluating silently.
+
+      # The genuinely LEADING indicator of the overload -> PoolTimeout ->
+      # breaker-opens-on-a-healthy-region loop. It fires before any timeout
+      # does, which is exactly why it must not wake anyone.
+      - alert: MRFPPoolQueueing
+        expr: max(proxy_region_pool_waiters) > 0
+        for: 10m
+        labels: {severity: ticket}
+        annotations:
+          runbook: docs/RUNBOOK.md#alert-mrfppoolqueueing
+          summary: Requests are queuing for connections; scale out before it becomes an outage.

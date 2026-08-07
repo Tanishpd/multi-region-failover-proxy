@@ -470,3 +470,100 @@ mode armed without an explicit token, and a non-positive rate limit. The lifespa
 raises.
 
 **Consequence.** A typo is now a failed deploy instead of a silent behaviour change.
+
+---
+
+<a id="adr-021"></a>
+
+## ADR-021: A profile split, not a compromise
+
+**Date:** 2026-08-07 · **Status:** accepted
+
+**Context.** Production and the brief want genuinely different systems. A 200 ms
+read timeout is right for a mock region behind a `sleep` and absurd for real inference, where first
+token latency is seconds. `container_name` is pinned so `docker stop us-east-1-endpoint` works
+verbatim — and pinning it forbids replicas and rolling replacement. `MRFP_MODE=literal` is
+deliberately worse engineering that exists so the graded `except` block visibly fires. Degrading
+either side to satisfy the other loses something real.
+
+**Decision.** Two axes. `MRFP_PROFILE` ∈ `demo` | `prod` selects a settings preset, and
+`deploy/compose.prod.yml` is a **standalone** topology.
+
+Two mechanical details make it safe rather than merely tidy:
+
+- The preset source is registered **below** `env_settings`, so an explicit environment variable
+  always wins. `docker-compose.yml` pins `MRFP_READ_TIMEOUT_MS=200`, so even
+  `MRFP_PROFILE=prod` against the demo stack cannot move a graded number.
+- The prod topology is a separate FILE, not an override. Compose merge can add and replace keys but
+  cannot **delete** them, and the two keys production must not have — `container_name` and the
+  published `ports` — are exactly the ones the demo requires. An override file is structurally
+  incapable of expressing the production shape.
+
+The `demo` preset is **empty**: the demo profile *is* the shipped field defaults. A second copy of
+the graded numbers would be a second thing that can drift away from them.
+
+The profile changes CONFIGURATION, never CODE PATH. `if settings.profile ==` outside
+`validate_for_boot()` is forbidden — the moment the two profiles take different branches, only one
+of them is being tested.
+
+**Consequence.** Two compose files that can drift, paid for by `test_brief_freeze.py`, which asserts
+the shared keys stay in step and that prod has zero pinned container names. And the honest cost:
+**the production configuration is the one `make chaos` never exercises at graded thresholds** — a
+30 s read timeout makes a "transition p50 ≈ 200 ms" assertion meaningless. CI runs the matrix under
+prod with categorical assertions only.
+
+---
+
+<a id="adr-022"></a>
+
+## ADR-022: One pure-ASGI middleware instead of three BaseHTTPMiddleware layers
+
+**Date:** 2026-08-07 · **Status:** accepted
+
+**Context.** Each `BaseHTTPMiddleware` wraps the call in an anyio task group and pumps the response
+through a memory object stream. Measured on this machine with `httpx.ASGITransport`:
+
+```
+bare Starlette                    126 us/req
+3 x BaseHTTPMiddleware            599 us/req   overhead 473
+1 x pure-ASGI ContextMiddleware   151 us/req   overhead  25
+```
+
+473 µs of pure CPU per request caps one worker near 1,700 rps before any proxying happens.
+
+Separately, `proxy_requests_total` was incremented only inside `ResilientRouter.route`, so every
+429, 413, 408, 404 and shed 503 was invisible to any availability calculation — the SLI could not
+be computed at all.
+
+**Decision.** One pure-ASGI layer doing request-id, client identity, rate limiting and response
+telemetry. It is the outermost thing that sees a terminal status, so it is also the only place that
+can count one. Fixing throughput and making the SLIs honest turned out to be the same edit.
+
+**Consequence.** ~18× less middleware overhead, and a `proxy_http_responses_total` labelled by
+client-visible outcome. The middleware-ordering trap disappears with the layers: ordering is now
+explicit statements inside one `__call__` rather than an implicit consequence of `add_middleware`
+prepending. `request_id.py` and `ratelimit_mw.py` are deleted; `client_identity.py` keeps its pure
+functions, which is the part that was ever worth testing in isolation.
+
+---
+
+<a id="adr-023"></a>
+
+## ADR-023: Saturation is not a region failure
+
+**Date:** 2026-08-07 · **Status:** accepted
+
+**Context.** `max_inflight` (128) exceeded the per-region connection pool (64). Above the pool,
+overload surfaces as `PoolTimeout` — which the router recorded as a region failure. That opens a
+breaker on a region **that was never contacted**, and purges its warm connection pool at exactly
+peak load. The remaining regions absorb the traffic and follow. Load becomes a self-inflicted
+multi-region outage, and every signal says the regions failed.
+
+**Decision.** `pool_timeout` and `attempt_deadline` are `SELF_INFLICTED`: they never write region
+health and never vote to the breaker. They are the only two codes in the contract's vocabulary that
+a region outage physically cannot produce, which also makes them a nearly false-positive-free page
+(`MRFPSelfInflictedSaturation`). Admission is additionally derived from the smallest pool when
+`MRFP_MAX_INFLIGHT=0`, so overload sheds cleanly at the gate instead of manufacturing timeouts.
+
+**Consequence.** Overload now produces a fast 503 at admission with `proxy_admission_rejected_total`
+rising, and `proxy_region_pool_waiters` goes positive before any of it — the leading indicator.

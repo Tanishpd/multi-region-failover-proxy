@@ -25,6 +25,24 @@ if grep -q '_pending_' "$REPORT"; then
   fail=1
 fi
 
+# An alert whose runbook anchor does not exist is worse than no alert: it wakes
+# someone at 3am and then tells them nothing.
+RULES="$ROOT/ops/observability/rules/slo.yml"
+if [[ -f "$RULES" ]]; then
+  missing=0
+  total=0
+  while read -r name; do
+    total=$((total + 1))
+    if ! grep -qi "^### alert-${name}\$" "$ROOT/docs/RUNBOOK.md"; then
+      printf 'docs-check: alert %s has no runbook section\n' "$name" >&2
+      missing=$((missing + 1))
+    fi
+  done < <(grep -oE '^\s+- alert: [A-Za-z]+' "$RULES" | awk '{print $3}')
+  printf 'docs-check: %s alerts, %s runbook anchors, %s missing\n' \
+    "$total" "$((total - missing))" "$missing"
+  [[ "$missing" -eq 0 ]] || fail=1
+fi
+
 if [[ "$fail" -eq 0 ]]; then
   printf 'docs-check: ok\n'
 fi

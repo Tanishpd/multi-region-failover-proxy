@@ -289,3 +289,73 @@ def test_unknown_exceptions_are_reraised_not_blamed_on_a_region() -> None:
     """
     with pytest.raises(ValueError):
         classify(ValueError("a bug in the proxy"))
+
+
+async def test_readyz_health_verdict_expires() -> None:
+    """/readyz must not latch.
+
+    A brief partition marks every region bad. If that verdict never expires,
+    readiness stays 503, an orchestrator pulls the pod from service, no traffic
+    arrives, nothing can record a success — and it never comes back, while
+    /healthz cheerfully reports 200.
+    """
+    import time
+
+    router = build_router(
+        {
+            "us-east-1": httpx.ConnectError("gone"),
+            "eu-west-1": httpx.ConnectError("gone"),
+            "ap-southeast-1": httpx.ConnectError("gone"),
+        },
+        health_stale_after_s=30.0,
+    )
+    await router.route(make_request())
+    assert router.usable_regions() == [], "all three should be out immediately after failing"
+
+    # Age the verdicts past the staleness window.
+    for health in router.health.values():
+        health.at = time.time() - 31
+    assert len(router.usable_regions()) == 3, "verdicts never expired — /readyz has latched"
+
+
+async def test_usable_regions_does_not_consume_breaker_probes() -> None:
+    """Readiness polling must not steal the single half-open probe token.
+
+    breaker.allow() is stateful: it flips OPEN to HALF_OPEN and claims the
+    token. A /readyz poll calling it would starve real traffic of probes.
+    """
+    from app.breaker import Breaker
+
+    breaker = Breaker(failure_threshold=1, cooldown_s=0.0)
+    router = build_router({"us-east-1": httpx.ConnectError("gone")})
+    router.breaker = breaker
+    breaker.record_failure("us-east-1")  # -> OPEN, cooldown 0 so immediately probeable
+
+    router.usable_regions()
+    router.usable_regions()
+
+    allowed, state = breaker.allow("us-east-1")
+    assert allowed and state == "half_open", "readiness consumed the probe token"
+
+
+async def test_shed_is_not_amplified_when_configured() -> None:
+    """A 429 means the region is ALIVE and full.
+
+    Replaying it to the next region is how one region's overload becomes the
+    fleet's: the neighbour absorbs the shed load on top of its own, tips, and
+    exports the sum onward.
+    """
+    router = build_router({"us-east-1": 429}, failover_on_shed=False)
+    result = await router.route(make_request())
+
+    assert result.status == 429
+    assert result.region == "us-east-1"
+    assert router.clients["eu-west-1"].calls == 0, "shed load was amplified to a neighbour"
+    assert router.health["us-east-1"].ok is True, "a shedding region is healthy, not failed"
+
+
+async def test_shed_still_fails_over_in_the_default_demo_profile() -> None:
+    """Requirement 4's demo shows a 503 region failing over, so the default keeps that."""
+    router = build_router({"us-east-1": 503})
+    result = await router.route(make_request())
+    assert result.region == "eu-west-1"
