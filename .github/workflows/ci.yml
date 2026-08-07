@@ -43,7 +43,12 @@ jobs:
         # The conftest guard refuses to touch a Redis that our own stack did
         # not seed. That guard exists because a developer machine has a real
         # Redis one port away.
-        run: redis-cli -h 127.0.0.1 -p 6380 -n 15 SET mrfp:test-guard "ci"
+        #
+        # Via the redis image rather than a bare `redis-cli`: GitHub runners do
+        # not ship redis-tools, and the bare call failed with exit 127.
+        run: |
+          docker run --rm --network host redis:7.2-alpine \
+            redis-cli -h 127.0.0.1 -p 6380 -n 15 SET mrfp:test-guard "ci"
       - run: pytest -q -m integration
         env:
           MRFP_REDIS_URL_TEST: redis://127.0.0.1:6380/15

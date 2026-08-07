@@ -186,3 +186,31 @@ def test_prod_and_demo_regions_do_not_drift() -> None:
         prod_env = prod["services"][region]["environment"]
         assert demo_env["MRFP_REGION_ID"] == prod_env["MRFP_REGION_ID"]
         assert demo_env["MRFP_BASE_LATENCY_MS"] == prod_env["MRFP_BASE_LATENCY_MS"]
+
+
+def test_the_prod_profile_actually_boots() -> None:
+    """The budget check must pass for the configuration it ships with.
+
+    It did not: the validator hardcoded `x 3` regions while the prod profile
+    deliberately attempts 2, so it rejected a correct configuration and the prod
+    stack would not start. Caught only by actually booting it — every unit test
+    passed throughout.
+    """
+    prod = _fresh_settings(
+        MRFP_PROFILE="prod",
+        MRFP_REDIS_URL="redis://redis:6379/0",
+        MRFP_TRUSTED_PROXIES="10.0.0.0/8",
+        MRFP_ADMIN_TOKEN="x",
+        MRFP_API_KEYS_FILE="/secrets/keys.json",
+    )
+    assert prod.validate_for_boot() == [], "the prod profile cannot boot as shipped"
+
+
+def test_budget_check_scales_with_the_attempt_limit() -> None:
+    two = _fresh_settings(MRFP_REDIS_URL="x", MRFP_REGION_ATTEMPT_LIMIT="2")
+    assert not [p for p in two.validate_for_boot() if "TOTAL_BUDGET" in p]
+
+    three = _fresh_settings(
+        MRFP_REDIS_URL="x", MRFP_REGION_ATTEMPT_LIMIT="3", MRFP_TOTAL_BUDGET_MS="500"
+    )
+    assert [p for p in three.validate_for_boot() if "TOTAL_BUDGET" in p]

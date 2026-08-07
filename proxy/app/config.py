@@ -185,14 +185,23 @@ class Settings(BaseSettings):
             )
 
         # The budget must fit the walk it is meant to bound, or the last region
-        # is silently never tried and failover looks broken for no visible reason.
+        # attempted is silently never reached and failover looks broken for no
+        # visible reason.
+        #
+        # Scaled by region_attempt_limit, not a hardcoded 3. Hardcoding it meant
+        # this check rejected the prod profile — which deliberately attempts two
+        # regions — as if it had budgeted for three. A validator that refuses a
+        # correct configuration is worse than no validator, because the operator
+        # learns to work around it.
         per_attempt = self.connect_timeout_ms + self.read_timeout_ms
-        needed = per_attempt * 3
+        attempts = self.region_attempt_limit
+        needed = per_attempt * attempts
         if self.total_budget_ms < needed:
             problems.append(
                 f"MRFP_TOTAL_BUDGET_MS={self.total_budget_ms} is below "
-                f"3 x (connect {self.connect_timeout_ms} + read {self.read_timeout_ms}) "
-                f"= {needed}ms, so the third region can never be attempted"
+                f"{attempts} x (connect {self.connect_timeout_ms} + read {self.read_timeout_ms}) "
+                f"= {needed}ms, so attempt {attempts} can never be made. Raise the budget or "
+                f"lower MRFP_REGION_ATTEMPT_LIMIT."
             )
 
         if self.chaos_mode and not self.chaos_token:

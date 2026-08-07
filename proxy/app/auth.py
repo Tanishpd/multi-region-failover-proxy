@@ -68,10 +68,39 @@ class KeyStore:
             self._by_hash = {}
             return 0
 
-        raw = json.loads(Path(self.path).read_text())
+        path = Path(self.path)
+        if not path.exists():
+            raise RuntimeError(
+                f"MRFP_API_KEYS_FILE={self.path!r} does not exist. Refusing to start with "
+                "authentication enabled and no key store."
+            )
+
+        try:
+            raw = json.loads(path.read_text())
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"{self.path} is not valid JSON: {exc}") from exc
+
         table: dict[str, Principal] = {}
         for tenant, cfg in raw.items():
-            digest = str(cfg["sha256"]).lower()
+            # Leading underscore is the comment convention, since JSON has none.
+            # Without this the shipped keys.example.json — whose `_comment` is a
+            # string, not an object — crashed the loader with a raw TypeError
+            # and the proxy would not boot.
+            if tenant.startswith("_"):
+                continue
+            if not isinstance(cfg, dict) or "sha256" not in cfg:
+                raise RuntimeError(
+                    f"{self.path}: entry {tenant!r} must be an object with a 'sha256' field. "
+                    "Generate one with: python -c \"import secrets,hashlib;"
+                    "k='mrfp_sk_'+secrets.token_urlsafe(32);print(k);"
+                    'print(hashlib.sha256(k.encode()).hexdigest())"'
+                )
+            digest = str(cfg["sha256"]).strip().lower()
+            if len(digest) != 64:
+                raise RuntimeError(
+                    f"{self.path}: entry {tenant!r} has a {len(digest)}-character sha256; "
+                    "expected 64 hex characters. Keys are stored HASHED, never in plaintext."
+                )
             table[digest] = Principal(
                 kind="key",
                 id=tenant,
