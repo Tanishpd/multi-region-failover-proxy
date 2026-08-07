@@ -21,7 +21,10 @@ from app import api
 from app.config import settings
 from app.logging_setup import configure, logx
 from app.middleware.client_identity import ClientIdentityMiddleware
+from app.middleware.ratelimit_mw import RateLimitMiddleware
 from app.middleware.request_id import RequestIdMiddleware
+from app.ratelimit.limiter import TokenBucketLimiter
+from app.redis_client import build_redis
 from app.region_client import RegionClient
 from app.regions import RegionRegistry
 from app.router import ResilientRouter
@@ -65,9 +68,21 @@ async def lifespan(app: Starlette):
         # the transport and is silently discarded.
         client.assert_pool_limits()
 
+    redis = build_redis(settings.redis_url) if settings.redis_url else None
+    limiter = TokenBucketLimiter(
+        redis,
+        capacity=settings.rl_capacity,
+        refill_per_sec=settings.rl_refill_per_sec,
+        ttl_pad_ms=settings.rl_ttl_pad_ms,
+        fail_mode=settings.rl_fail_mode,
+        breaker=None,
+    )
+
     app.state.settings = settings
     app.state.registry = registry
     app.state.clients = clients
+    app.state.redis = redis
+    app.state.limiter = limiter
     app.state.admission = asyncio.Semaphore(settings.max_inflight)
     app.state.primary_region = registry.ordered()[0].id
     app.state.router = ResilientRouter(registry, clients, settings, breaker=None)
@@ -76,12 +91,16 @@ async def lifespan(app: Starlette):
         "ready",
         regions=[s.id for s in registry.ordered()],
         primary=app.state.primary_region,
+        rate_limit=f"{settings.rl_capacity} @ {settings.rl_refill_per_sec}/s",
+        redis=bool(redis),
     )
     try:
         yield
     finally:
         for client in clients.values():
             await client.aclose()
+        if redis is not None:
+            await redis.aclose()
         logx("shutdown")
 
 
@@ -93,13 +112,24 @@ def create_app() -> Starlette:
             Route("/healthz", api.healthz, methods=["GET"]),
             Route("/readyz", api.readyz, methods=["GET"]),
             Route("/admin/regions", api.admin_regions, methods=["GET"]),
+            Route("/admin/ratelimit", api.admin_ratelimit, methods=["GET", "DELETE"]),
             Route("/debug/whoami", api.whoami, methods=["GET"]),
         ],
         exception_handlers={404: api.not_found, 500: api.server_error},
     )
 
-    # Reverse of execution order. Execution is:
-    #   RequestId (outermost) -> ClientIdentity -> [RateLimit, Phase 4] -> route
+    # REVERSE of execution order — add_middleware PREPENDS, so the last one
+    # registered is outermost. Execution is:
+    #   RequestId (outermost) -> ClientIdentity -> RateLimit -> route
+    #
+    # Getting this backwards would put the router outside the limiter, so 429s
+    # would be attributed to us-east-1 in the metrics and request_id would be
+    # unset when the 429 body is built.
+    app.add_middleware(
+        RateLimitMiddleware,
+        chaos_mode=bool(settings.chaos_mode),
+        chaos_token=settings.chaos_token,
+    )
     app.add_middleware(ClientIdentityMiddleware, trusted_proxies=settings.trusted_proxies)
     app.add_middleware(RequestIdMiddleware)
     return app

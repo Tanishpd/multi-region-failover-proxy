@@ -57,6 +57,13 @@ class Settings(BaseSettings):
 
     trusted_proxies: str = "127.0.0.1/32,::1/128"
 
+    # Token bucket. capacity is the largest burst allowed; refill_per_sec is the
+    # sustained rate. Two numbers, because they are two different limits.
+    rl_capacity: int = 20
+    rl_refill_per_sec: float = 20.0
+    rl_ttl_pad_ms: int = 2000
+    rl_fail_mode: str = "open"  # open | closed
+
     log_level: str = "INFO"
     chaos_mode: int = 0
     chaos_token: str = ""

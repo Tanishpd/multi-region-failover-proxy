@@ -95,6 +95,32 @@ async def admin_regions(request: Request) -> JSONResponse:
     )
 
 
+async def admin_ratelimit(request: Request) -> JSONResponse:
+    """Inspect or reset a bucket. GET peeks without consuming; DELETE clears it.
+
+    `peek` matters: inspecting a bucket must not change it, or the act of
+    debugging a rate limit becomes part of the rate limit.
+    """
+    state = request.app.state
+    identity = request.query_params.get("id") or getattr(request.state, "client_ip", "unknown")
+
+    if request.method == "DELETE":
+        cleared = await state.limiter.reset(identity)
+        return JSONResponse({"identity": identity, "cleared": cleared})
+
+    decision = await state.limiter.peek(identity)
+    return JSONResponse(
+        {
+            "identity": identity,
+            "bucket_key": decision.bucket_key,
+            "limit": decision.limit,
+            "remaining": decision.remaining,
+            "reset_after_s": decision.reset_after_s,
+            "mode": decision.mode,
+        }
+    )
+
+
 async def whoami(request: Request) -> JSONResponse:
     """What the proxy thinks you are — the first stop when every client shares
     one rate-limit bucket."""

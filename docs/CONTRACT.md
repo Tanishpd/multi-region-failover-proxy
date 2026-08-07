@@ -241,10 +241,14 @@ Default trusted set is loopback only. It is **not** widened to RFC1918: Docker D
 bridge-gateway peer address, and trusting all of RFC1918 would make that peer trusted and hand every
 container-originated request full XFF authority.
 
-> **TODO on first boot:** run `curl -s localhost:8000/debug/whoami` once, record the actual peer
-> address observed on this machine below, and add exactly that `/32` if the demo requires it.
->
-> Observed peer address on this host: _(not yet measured — fill in during Phase 2)_
+**Measured on this host (Phase 4):** `curl -s localhost:8000/debug/whoami` reports
+`peer = 172.19.0.1` — the Docker Desktop bridge gateway — for traffic originating on the host. So
+**every host-side client shares one bucket** by default, exactly as predicted. That is why
+`MRFP_TRUSTED_PROXIES` includes `172.16.0.0/12` in compose: without it the gateway is untrusted and
+XFF is never consulted at all.
+
+It is also why the demo's 429 burst must be fired in parallel: sequential `curl` calls share that
+single bucket but arrive slowly enough for it to refill between them.
 
 ---
 

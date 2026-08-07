@@ -79,8 +79,8 @@ logs:
 test-unit: venv
 	@$(PYTEST) -q -m unit
 
-test:
-	@bash ops/scripts/_todo.sh 7 "make test"
+test: venv
+	@$(PYTEST) -q
 
 lint: venv
 	@$(RUFF) check .
@@ -109,7 +109,7 @@ bench:
 # --- housekeeping -----------------------------------------------------------
 
 reset:
-	@bash ops/scripts/_todo.sh 4 "make reset"
+	@bash ops/scripts/reset.sh
 
 clean:
 	@bash ops/scripts/clean.sh

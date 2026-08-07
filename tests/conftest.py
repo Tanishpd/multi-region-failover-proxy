@@ -57,11 +57,17 @@ async def redis_test_client(redis_url: str, redis_available: bool):
 
     # Guard 2: the sentinel key is written by our container at startup. Its
     # absence means this is somebody else's Redis, whatever the db index says.
+    #
+    # It also disappears whenever our Redis restarts, because the container is
+    # deliberately cache-only with no persistence (ADR-014) — so a missing
+    # sentinel usually means "re-seed", not "wrong server". Say both.
     if not await client.exists(SENTINEL_KEY):
         await client.aclose()
         pytest.fail(
-            f"refusing to run: sentinel key {SENTINEL_KEY!r} missing from {redis_url}. "
-            "This does not look like the MRFP test Redis."
+            f"refusing to run: sentinel key {SENTINEL_KEY!r} missing from {redis_url}.\n"
+            "Either this is not the MRFP test Redis, or ours restarted and lost it "
+            "(the container is cache-only by design).\n"
+            "Fix: `make up` — that re-runs the seed container."
         )
 
     try:
