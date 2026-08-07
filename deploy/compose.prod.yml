@@ -66,6 +66,12 @@ services:
       # command, the limiter fails open, and rate limiting is silently absent.
       MRFP_REDIS_PASSWORD: ${MRFP_REDIS_PASSWORD:-}
       MRFP_REGIONS_FILE: /config/regions.yaml
+      # MUST be a real environment variable, not just a profile default. The
+      # Dockerfile passes it to uvicorn's --timeout-graceful-shutdown, and a
+      # shell expansion in CMD cannot see a value that only exists inside
+      # Python's Settings. Kept below stop_grace_period so Docker never SIGKILLs
+      # a drain that is still in progress.
+      MRFP_GRACEFUL_SHUTDOWN_S: "${MRFP_GRACEFUL_SHUTDOWN_S:-30}"
       # MUST name the real ingress. The prod profile refuses to boot on
       # loopback-only, because that means every client shares one bucket.
       MRFP_TRUSTED_PROXIES: ${MRFP_TRUSTED_PROXIES:?set the ingress CIDR}

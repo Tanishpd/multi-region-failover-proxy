@@ -197,6 +197,13 @@ session.
 
 **Docker / Compose**
 
+- A **profile default is invisible to the Dockerfile.** `Settings`/profile values live inside Python;
+  a `CMD` shell expansion cannot see them. Anything that must reach the process's *command line*
+  (uvicorn flags) has to be a real environment variable in compose as well. `MRFP_GRACEFUL_SHUTDOWN_S`
+  looked fixed and still gave uvicorn the wrong value until this was understood.
+- `CMD` in **exec form cannot expand `${VAR}`**; plain shell form leaves the shell as PID 1 so the
+  app never gets SIGTERM. Use `CMD ["sh","-c","exec <app> ..."]`.
+
 - YAML anchors **shallow-merge**. A per-service `environment:` block replaces the anchor's entirely.
   Shared region env lives in `region/region.env` via `env_file:`, not in the anchor.
 - `env_file:` pointing at a gitignored file is a hard error on a fresh checkout. Only reference

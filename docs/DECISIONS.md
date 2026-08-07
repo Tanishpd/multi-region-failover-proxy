@@ -973,3 +973,43 @@ the largest stream you accept.**
 Availability is asserted on the **fleet**, not per tenant. With ~60 requests each, one failure is
 1.7%, so a per-tenant 99.5% bar is "zero errors" wearing an SLO's clothes. Fairness is a separate
 question and gets a separate check.
+
+---
+
+<a id="adr-031"></a>
+
+## ADR-031: Graceful shutdown was hardcoded, so every deploy dropped requests
+
+**Date:** 2026-08-07 · **Status:** accepted
+
+**Context.** Rolling deploys are the most frequent event in a service's life, and the only one this
+project had never drilled. `graceful_shutdown_s` existed as a setting, the prod profile set it to
+**30**, compose plumbed `MRFP_GRACEFUL_SHUTDOWN_S`, and `stop_grace_period: 45s` was sized around
+it — while `proxy/Dockerfile` passed uvicorn a literal `--timeout-graceful-shutdown 2`. **Nothing
+consumed the setting.**
+
+Measured against the production profile with a 6-second request in flight:
+
+| | `docker stop` returned in |
+|---|---|
+| hardcoded `2` | **2.36 s** — the request was cut off |
+| reading the setting (30) | **5 s** — waited out the remaining ~4 s |
+
+So every rolling deploy dropped every request slower than two seconds. At the prod profile's 30-second
+read timeout, sized for real inference, that is most of them.
+
+**Decision.** The CMD reads `${MRFP_GRACEFUL_SHUTDOWN_S:-5}`, via `sh -c` with **`exec`** — exec form
+cannot expand a variable, and plain shell form would leave the shell as PID 1 so uvicorn would never
+receive SIGTERM, converting every graceful shutdown into a SIGKILL at the grace deadline.
+
+**Consequence — and the subtlety that nearly hid the fix.** After the Dockerfile change uvicorn still
+got **5**, not 30. A profile default lives inside Python's `Settings`; a Dockerfile shell expansion
+cannot see it. Anything destined for the process's *command line* must also be a real environment
+variable, so `compose.prod.yml` now sets it explicitly. A test asserts it stays below
+`stop_grace_period`, or Docker SIGKILLs a drain still in progress and the longer window buys nothing.
+
+This is the seventh instance of one failure in this repository: **a capability written in one place
+and its access surface in another, with only the first tested.** The others were
+`MRFP_STREAMING_ENABLED`, `MRFP_IDEMPOTENCY_ENABLED`, Sentinel in prod, `MRFP_UPSTREAM_BASE_URL`,
+Sentinel in the demo compose, and nine `make` targets missing from `make help`. Every one was found
+by running the shipped artifact rather than the unit tests.

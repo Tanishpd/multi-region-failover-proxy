@@ -438,3 +438,45 @@ def test_soak_availability_is_a_fleet_metric() -> None:
     body = code_only(ROOT / "chaos" / "soak.py")
     assert "fleet availability" in body
     assert "fleet_ok / fleet_total" in body
+
+
+# --- graceful shutdown must actually be configurable (ADR-031) --------------
+
+
+def test_uvicorn_gets_the_configured_graceful_shutdown_window() -> None:
+    """It was hardcoded to 2 while the setting existed, was set to 30 by the
+    prod profile, and was plumbed through compose — and nothing consumed it.
+
+    Measured: with a 6-second request in flight, `docker stop` returned in
+    2.36s and cut it off, on a profile whose stop_grace_period is 45s precisely
+    so that cannot happen. After the fix the same experiment took 5s, draining
+    the request. Every rolling deploy had been dropping anything slower than
+    two seconds.
+    """
+    dockerfile = (ROOT / "proxy" / "Dockerfile").read_text()
+    assert "${MRFP_GRACEFUL_SHUTDOWN_S:-5}" in dockerfile
+    assert '"--timeout-graceful-shutdown", "2"' not in dockerfile
+    # `exec` or the shell stays PID 1 and uvicorn never receives SIGTERM, which
+    # turns every graceful shutdown into a SIGKILL at the grace deadline.
+    assert "exec uvicorn" in dockerfile
+
+
+def test_prod_passes_it_as_a_real_environment_variable() -> None:
+    """A profile default lives inside Python. A Dockerfile shell expansion
+    cannot see it, so a setting destined for the command line must also be a
+    real env var — the fix appeared to work and still gave uvicorn 5, not 30,
+    until this was added."""
+    prod = (ROOT / "deploy" / "compose.prod.yml").read_text()
+    assert "MRFP_GRACEFUL_SHUTDOWN_S" in prod
+
+
+def test_graceful_shutdown_stays_under_the_stop_grace_period() -> None:
+    """Above it, Docker SIGKILLs a drain that is still in progress and the
+    longer window buys nothing."""
+    import re
+
+    prod = (ROOT / "deploy" / "compose.prod.yml").read_text()
+    graceful = int(re.search(r"MRFP_GRACEFUL_SHUTDOWN_S: \"\$\{[A-Z_]+:-(\d+)\}\"", prod).group(1))
+    proxy_block = prod[prod.index("  proxy:") : prod.index("  us-east-1-endpoint:")]
+    grace = int(re.search(r"stop_grace_period: (\d+)s", proxy_block).group(1))
+    assert graceful < grace, f"graceful shutdown {graceful}s >= stop_grace_period {grace}s"
