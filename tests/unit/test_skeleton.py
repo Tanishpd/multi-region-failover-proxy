@@ -217,3 +217,55 @@ def _covers(recipe: str, ci_cmd: str) -> bool:
     """True when the recipe invokes ruff with the same subcommand and flags."""
     want = [t for t in ci_cmd.split() if t != "."]
     return any(all(tok in line for tok in want) for line in recipe.splitlines() if "RUFF" in line)
+
+
+# --- the docs must describe the system that exists --------------------------
+
+
+def test_every_setting_is_documented_in_the_contract() -> None:
+    """`docs-check` and the link checker are mechanical: they cannot tell
+    whether a doc still describes the current system. 18 settings had accreted
+    without reaching CONTRACT.md's env table, including several added the same
+    day. Same shape as every other bug here — two surfaces, one of them tested.
+    """
+    import sys
+
+    sys.path.insert(0, str(ROOT / "proxy"))
+    from app.config import Settings
+
+    contract = (ROOT / "docs" / "CONTRACT.md").read_text()
+    missing = sorted(
+        f"MRFP_{name.upper()}"
+        for name in Settings.model_fields
+        if f"MRFP_{name.upper()}" not in contract
+    )
+    assert not missing, f"settings missing from CONTRACT.md: {missing}"
+
+
+def test_the_log_vocabulary_really_is_closed() -> None:
+    """CONTRACT §8 and CLAUDE.md §6 both state the event vocabulary is closed
+    and that the same strings are metric labels and doc terms. 25 events had
+    been coined without being added — a rule with nothing enforcing it."""
+    import re
+
+    contract = (ROOT / "docs" / "CONTRACT.md").read_text()
+    events: set[str] = set()
+    for source in (ROOT / "proxy" / "app").rglob("*.py"):
+        events |= set(re.findall(r'logx\(\s*"([a-z_]+)"', source.read_text()))
+
+    missing = sorted(e for e in events if f"`{e}`" not in contract)
+    assert not missing, f"log events missing from the CONTRACT §8 vocabulary: {missing}"
+
+
+def test_every_make_target_is_in_the_agent_command_list() -> None:
+    """CLAUDE.md §4 is what an agent reads before touching the repo. A target
+    absent from it is a command that, for that reader, does not exist."""
+    import re
+
+    makefile = (ROOT / "Makefile").read_text()
+    claude = (ROOT / "CLAUDE.md").read_text()
+    targets = set(re.findall(r"^([a-z][a-z0-9-]*):(?!=)", makefile, flags=re.M))
+    targets -= {"help", "venv", "chaos-%"}
+
+    missing = sorted(t for t in targets if f"make {t}" not in claude)
+    assert not missing, f"make targets missing from CLAUDE.md §4: {missing}"

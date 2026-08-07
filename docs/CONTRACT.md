@@ -68,6 +68,25 @@ forbidden.
 | `MRFP_METRICS_PUBLIC` | `1` | `/metrics` is exempt from the admin guard by default; scrapers rarely send bearer tokens and it mutates nothing. |
 | `MRFP_BODY_READ_TIMEOUT_S` | `5` | Bounds the inbound body read. An admission slot is held across it. ([ADR-019](DECISIONS.md#adr-019)) |
 | `MRFP_REQUIRE_REDIS` | `1` | Refuse to boot without Redis. Set `0` only for a deliberate Redis-less run. ([ADR-020](DECISIONS.md#adr-020)) |
+| `MRFP_PROFILE` | `demo` | `demo` \| `prod`. Selects a preset; an explicit env var always WINS over it, so the shipped 200 ms read timeout survives `MRFP_PROFILE=prod`. ([ADR-021](DECISIONS.md#adr-021)) |
+| `MRFP_AUTH_MODE` | `off` | `off` \| `optional` \| `required`. `required` without `MRFP_API_KEYS_FILE` is a boot failure — refusing to claim authentication with no key store. |
+| `MRFP_API_KEYS_FILE` | `""` | JSON of `{tenant: {sha256, capacity, refill_per_sec}}`. `_`-prefixed keys are comments. |
+| `MRFP_MIN_ATTEMPT_MS` | `60` | Below this much remaining budget, do not start another attempt — there is not enough time for it to succeed. |
+| `MRFP_REGION_ATTEMPT_LIMIT` | `3` | How many regions the walk may try. The boot validator scales the budget check by this, not by a hardcoded 3. |
+| `MRFP_REPLAY_MAYBE_SENT` | `1` | Replay a `MAYBE_SENT` failure to the next region. `0` in prod, where a duplicate generation costs money. ([ADR-026](DECISIONS.md#adr-026)) |
+| `MRFP_FAILOVER_ON_SHED` | `1` | Treat an upstream 429/503 as failover-worthy. `0` in prod honours a deliberate shed instead of exporting one region's overload to its neighbour. |
+| `MRFP_MAX_RESPONSE_BYTES` | `8388608` | Ceiling on a buffered upstream response. |
+| `MRFP_HEALTH_STALE_AFTER_S` | `30` | How long a passive health verdict is trusted before `/readyz` treats the region as unknown again. |
+| `MRFP_REQUIRE_TLS` | `0` | Refuse cleartext with **426**, not a redirect — many clients drop the body on a 308, silently corrupting a POST. `X-Forwarded-Proto` is trusted only from a trusted peer. |
+| `MRFP_HSTS_MAX_AGE_S` | `31536000` | `Strict-Transport-Security` max-age, emitted only when TLS is required. |
+| `MRFP_IDEMPOTENCY_ENABLED` | `0` | Claim `Idempotency-Key` in Redis; a duplicate in flight gets **409**. ([ADR-026](DECISIONS.md#adr-026)) |
+| `MRFP_LOG_SAMPLE_RATE` | `1.0` | Samples INFO only. WARNING+ and one-per-process lifecycle events are never sampled — at 0.01 they would otherwise be deleted outright. ([ADR-029](DECISIONS.md#adr-029)) |
+| `MRFP_LOG_CLIENT_IP` | `raw` | `raw` \| `hashed` \| `none`. A client IP is personal data in most jurisdictions. |
+| `MRFP_GRACEFUL_SHUTDOWN_S` | `5` | Passed to uvicorn's `--timeout-graceful-shutdown` by the Dockerfile. Must be **below** `stop_grace_period` or Docker SIGKILLs a drain in progress. It was hardcoded to 2 for a long time, so every rolling deploy dropped requests slower than that. ([ADR-031](DECISIONS.md#adr-031)) |
+| `MRFP_STREAM_TTFB_TIMEOUT_S` | `30` | Time to first byte for a streamed response. Failover is still possible until the first byte. ([ADR-024](DECISIONS.md#adr-024)) |
+| `MRFP_STREAM_INTER_CHUNK_TIMEOUT_S` | `60` | Gap BETWEEN chunks, not total duration. A 60-second stream that never pauses is healthy. |
+| `MRFP_MAX_INFLIGHT_STREAMS` | `32` | Streams hold a slot for their whole life, so they get their own admission budget rather than sharing the buffered one. |
+| `MRFP_REPLICAS` | `1` | How many proxies share the deployment. Divides the local fallback bucket so N replicas do not enforce N x the limit with Redis down. ([ADR-025](DECISIONS.md#adr-025)) |
 
 Region-image variables (in `region/region.env` plus per-service overrides):
 
@@ -339,6 +358,31 @@ docs finds the log lines and the metrics too.
 | `stream_committed` | INFO | First byte written to the client; failover is no longer possible for this request. |
 | `stream_truncated` | ERROR | A committed stream died mid-body. Carries `emitted_bytes` and the region. |
 | `stream_preroll_failover` | WARNING | A region failed before commit, so the failover was invisible to the client. |
+| `boot` | INFO | First line of the process. The fully-resolved settings, because a wrong `MRFP_` prefix is ignored silently. |
+| `config_invalid` | ERROR | A boot validator refused the configuration. The process then exits non-zero. |
+| `shutdown` | INFO | Lifespan teardown complete. |
+| `draining` | WARNING | `/admin/drain` flipped readiness; `/healthz` deliberately stays 200. |
+| `ready` | INFO | Lifespan startup complete. |
+| `api_keys_loaded` | INFO | Key store loaded; carries the count and the auth mode. |
+| `admin_disabled` | WARNING | `MRFP_ADMIN_TOKEN` unset, so `/admin` and `/debug` return 404 rather than standing open. |
+| `admin_denied` | WARNING | A control-plane request presented a bad or missing bearer token. |
+| `admin_ratelimit_reset` | WARNING | An operator cleared a bucket through the control plane. |
+| `auth_rejected` | WARNING | A data-plane request failed API-key authentication. |
+| `cleartext_refused` | WARNING | `MRFP_REQUIRE_TLS` is on and the request was not HTTPS. Answered 426. |
+| `request_rejected` | WARNING | Rejected before routing: body too large, bad content type, malformed. |
+| `admission_rejected` | WARNING | Shed at the admission gate before any upstream work. |
+| `admission_above_pool` | WARNING | Boot: `max_inflight` exceeds the smallest region pool, so overload will surface as `PoolTimeout` rather than a clean shed. |
+| `upstream_shed` | WARNING | An upstream returned 429/503 — a deliberate shed, distinct from a failure. |
+| `self_inflicted_failure` | WARNING | The attempt failed for a reason that is ours (pool exhaustion, budget), so it is NOT recorded against the region's breaker. |
+| `response_too_large` | WARNING | An upstream body exceeded `MRFP_MAX_RESPONSE_BYTES`. |
+| `internal_error` | ERROR | An unhandled exception reached the outermost middleware. |
+| `circuit_probe_expired` | WARNING | A half-open probe never reported back and its single token was reclaimed. |
+| `breaker_gossip_subscribed` | INFO | Cross-replica gossip is listening. ([ADR-025](DECISIONS.md#adr-025)) |
+| `breaker_gossip_applied` | INFO | A remote replica's verdict was applied locally. The transition itself also logs `circuit_opened`. |
+| `breaker_gossip_reconnecting` | WARNING | The gossip subscriber lost Redis. Continuous repetition means the subscriber is misconfigured, not that Redis is flapping. ([ADR-025](DECISIONS.md#adr-025)) |
+| `local_buckets_evicted` | INFO | The in-process fallback bucket shed idle entries. |
+| `idempotency_replay_refused` | WARNING | A duplicate `Idempotency-Key` arrived; answered 409. ([ADR-026](DECISIONS.md#adr-026)) |
+| `idempotency_degraded` | WARNING | The idempotency store was unreachable; the claim was skipped, failing open like the limiter. |
 
 ### Failure classes and codes
 

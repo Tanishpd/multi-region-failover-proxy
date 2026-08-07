@@ -76,6 +76,7 @@ inspection one-liners in docs (`docker compose logs | jq`, `docker compose ps`) 
 make doctor       # preflight: daemon, ports, disk, arch, make version
 make build        # build both images (slow first time: 3-6 min)
 make up           # start the stack, wait for healthy
+make up-regions   # regions + redis only, without the proxy
 make down         # stop and remove
 make test-unit    # runs with the Docker daemon OFF
 make test         # full suite; needs the stack
@@ -98,6 +99,11 @@ make lint         # ruff check
 make fmt          # ruff format
 make docs-check   # fail on TODOs or numbers outside AUTOGEN blocks
 make reset        # flush app Redis keys (db 0 only)
+make clean        # remove .venv, caches and chaos artifacts
+make prod-config  # render deploy/compose.prod.yml and validate it
+make prod-up      # bring up the production topology (standalone)
+make prod-down
+make prod-cred-drill  # rotate the Redis credential under a live prod fleet
 ```
 
 ---
