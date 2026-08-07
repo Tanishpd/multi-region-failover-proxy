@@ -27,11 +27,28 @@ printf '%s\n' \
 "  make report       regenerate the AUTOGEN blocks in docs/CHAOS-REPORT.md" \
 "  make bench        ApacheBench throughput cross-check" \
 "" \
+"${B}verification${O}" \
+"  make capacity     step load until p99 degrades; find the knee" \
+"  make calibrate    measure region latency vs max_tokens; derive the timeouts" \
+"  make calibrate-check   ...and FAIL if a configured timeout is below it" \
+"  make soak         production-shaped traffic: many tenants + a noisy neighbour" \
+"" \
+"${B}redis high availability${O}" \
+"  make redis-ha-up  Sentinel topology: primary + replica + 3 sentinels" \
+"  make redis-ha-drill    kill the CURRENT primary; measure the client blip" \
+"  make redis-ha-e2e      the same, under LIVE proxy traffic" \
+"  make redis-ha-down" \
+"" \
 "${B}quality${O}" \
 "  make test         full suite (needs the stack up)" \
 "  make lint         ruff check" \
 "  make fmt          ruff format" \
 "  make docs-check   fail on TODOs or measurements outside AUTOGEN blocks" \
+"" \
+"${B}production profile${O}" \
+"  make prod-config  render deploy/compose.prod.yml and validate it" \
+"  make prod-up      bring up the production topology (standalone, not an override)" \
+"  make prod-down" \
 "" \
 "${B}housekeeping${O}" \
 "  make venv         create/refresh the host virtualenv" \

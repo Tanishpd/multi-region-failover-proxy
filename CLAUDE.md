@@ -57,6 +57,8 @@ the bug.
 | `chaos/run.py` | Chaos CLI. Exits non-zero when an assertion fails. |
 | `chaos/flood.py` | Open-loop request pacer. |
 | `chaos/calibrate.py` | Derives the timeouts from measurement. Gate, not report. |
+| `chaos/soak.py` | Production-shaped traffic. Per-tenant isolation lives here. |
+| `ops/datasets/workload.jsonl` | The soak's committed workload. Deterministic on purpose. |
 | `ops/scripts/redis-ha-drill.sh` | Kills the current Redis primary and times recovery. |
 | `deploy/compose.redis-ha.yml` | Sentinel topology: primary + replica + 3 sentinels. |
 | `ops/scripts/doctor.sh` | Preflight. Run this when anything is confusing. |
@@ -84,10 +86,13 @@ make logs         # follow proxy logs
 make ps           # what's running
 make health       # one-line status per region
 make bench        # ApacheBench cross-check (POST payload via -p)
+make capacity     # step load until p99 degrades; find the knee
+make soak         # production-shaped traffic: many tenants + a noisy neighbour
 make calibrate    # measure region latency vs max_tokens; derive the timeouts
 make calibrate-check  # ...and exit non-zero if a configured timeout is too small
 make redis-ha-up  # Sentinel topology: primary + replica + 3 sentinels
 make redis-ha-drill   # kill the CURRENT primary under load; measure the blip
+make redis-ha-e2e     # the same, under LIVE proxy traffic
 make redis-ha-down
 make lint         # ruff check
 make fmt          # ruff format

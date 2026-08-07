@@ -137,3 +137,51 @@ def test_env_example_has_no_default_redis_url_in_code_path() -> None:
     assert "MRFP_REDIS_URL=redis://redis:6379/0" in env, "in-network URL expected"
     assert "MRFP_REDIS_URL=redis://127.0.0.1:6379" not in env
     assert "MRFP_REDIS_URL_HOST=redis://127.0.0.1:6380/0" in env
+
+
+# --- every command must be discoverable (the sixth reachability bug) --------
+
+
+def test_every_make_target_appears_in_make_help() -> None:
+    """`make help` is the discovery surface, and it had gone stale.
+
+    Six targets — capacity, calibrate, calibrate-check, soak, and the four
+    redis-ha-* — existed, worked, and were documented in ADRs while being
+    invisible from the project's own front door. That is the same shape as the
+    five plumbing bugs before it: the thing works, and nothing can reach it.
+
+    This is the structural fix. A new target now fails the suite until it is
+    listed, so discoverability stops depending on remembering.
+    """
+    import re
+
+    makefile = (ROOT / "Makefile").read_text()
+    help_text = (ROOT / "ops" / "scripts" / "help.sh").read_text()
+
+    targets = set(re.findall(r"^([a-z][a-z0-9-]*):(?!=)", makefile, flags=re.M))
+    # Pattern rules and internal plumbing are not user-facing commands.
+    targets -= {"help", "venv", "chaos-%"}
+
+    missing = sorted(t for t in targets if f"make {t}" not in help_text)
+    assert not missing, f"targets missing from `make help`: {missing}"
+
+
+def test_help_does_not_advertise_targets_that_do_not_exist() -> None:
+    """The inverse: a help entry for a removed target sends people at a wall."""
+    import re
+
+    makefile = (ROOT / "Makefile").read_text()
+    help_text = (ROOT / "ops" / "scripts" / "help.sh").read_text()
+
+    targets = set(re.findall(r"^([a-z][a-z0-9-]*):(?!=)", makefile, flags=re.M))
+    # Anchored to a help ENTRY, not to any prose containing the word "make" —
+    # the first version matched "arch, make version" out of the doctor line.
+    advertised = set(re.findall(r'^"\s+make ([a-z][a-z0-9-]*)', help_text, flags=re.M))
+
+    # `chaos-NAME` / `chaos-pause-us-east` document the chaos-% pattern rule.
+    phantom = sorted(
+        a
+        for a in advertised
+        if a not in targets and not (a.startswith("chaos-") and "chaos-%:" in makefile)
+    )
+    assert not phantom, f"`make help` advertises non-existent targets: {phantom}"
