@@ -8,6 +8,14 @@ on:
     # published AFTER you ship, so a build-time gate alone is not enough.
     - cron: "0 6 * * 1"
 
+# ACTION VERSION POLICY: bump only as far as needed to stay on a supported
+# Node runtime, not to the newest tag. Every run was printing "Node.js 20 is
+# deprecated ... forced to run on Node.js 24" for checkout, setup-python and
+# upload-artifact; one major each clears it. checkout/setup-python/
+# upload-artifact are at v7 upstream, and jumping four majors to silence a
+# warning trades a known deprecation for unknown breaking changes in the one
+# workflow that gates every push.
+
 permissions:
   contents: read
 
@@ -17,8 +25,8 @@ jobs:
     # guarantee `make test-unit` gives a reader locally.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with: {python-version: "3.13"}
       - run: pip install -r requirements-dev.txt
       - run: ruff check .
@@ -35,8 +43,8 @@ jobs:
         ports: ["6380:6379"]
         options: --health-cmd "redis-cli ping" --health-interval 3s --health-retries 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with: {python-version: "3.13"}
       - run: pip install -r requirements-dev.txt
       - name: seed the test sentinel
@@ -59,8 +67,8 @@ jobs:
     # make a 200 ms threshold flap, and a flaky gate is worse than no gate.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with: {python-version: "3.13"}
       - run: pip install -r requirements-dev.txt
       - run: docker compose build
@@ -83,7 +91,7 @@ jobs:
       - if: always()
         run: docker compose logs --no-log-prefix mrfp-proxy | tail -50
       - if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with: {name: chaos-artifacts, path: artifacts/}
 
   image:
@@ -91,7 +99,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions: {contents: read, packages: write, id-token: write}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: docker/setup-buildx-action@v3
       - name: lowercase the image name
         # Container registry names must be lowercase, and github.repository
@@ -99,7 +107,7 @@ jobs:
         # rejects with "repository name must be lowercase".
         id: img
         run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}/proxy" >> "$GITHUB_OUTPUT"
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
