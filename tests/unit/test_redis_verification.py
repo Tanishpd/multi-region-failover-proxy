@@ -143,3 +143,43 @@ async def test_a_protocol_error_is_also_fatal() -> None:
     limiter would fail open on it for as long as the deploy lives."""
     with pytest.raises(RedisMisconfigured):
         await verify_redis(FakeRedis(ResponseError("ERR unknown command")))
+
+
+# --- the refusal must be findable, and the alert must not cry wolf ----------
+
+
+def test_the_boot_refusal_emits_a_structured_event() -> None:
+    """Measured: the first version produced ONLY a Python traceback.
+
+    Every other boot failure here goes through logx as `config_invalid`. A log
+    aggregator that parses `event` would have seen nothing for the single most
+    important boot failure in the system.
+    """
+    body = (ROOT / "proxy" / "app" / "main.py").read_text()
+    assert 'logx("redis_refused"' in body
+    refusal = body[body.index("except RedisMisconfigured") :][:600]
+    assert "raise" in refusal, "must still refuse to boot, not just log about it"
+
+
+def test_both_new_events_are_in_the_closed_vocabulary() -> None:
+    """CLAUDE.md §6: the log event vocabulary is closed, and the same strings
+    are metric label values and doc terms. I coined `redis_verified` without
+    adding it, which is exactly the drift that rule exists to stop."""
+    contract = (ROOT / "docs" / "CONTRACT.md").read_text()
+    for event in ("redis_verified", "redis_refused"):
+        assert f"`{event}`" in contract, f"{event} is not in the contract vocabulary"
+
+
+def test_the_degraded_alert_cannot_fire_for_a_deliberately_redisless_run() -> None:
+    """A permanently firing page is worse than no alert: it trains people to
+    ignore the ones that matter. `MRFP_REQUIRE_REDIS=0` is a supported mode, and
+    it would have pinned rate_limit_backend_up at 0 forever."""
+    rules = (ROOT / "ops" / "observability" / "rules" / "slo.yml").read_text()
+    assert "rate_limit_backend_up == 0 and rate_limit_backend_configured == 1" in rules
+
+
+def test_the_configured_gauge_is_actually_written() -> None:
+    """The pool_waiters lesson: a gauge an alert reads but nothing writes makes
+    the alert unfireable, and manufactures confidence that something is watched."""
+    body = (ROOT / "proxy" / "app" / "main.py").read_text()
+    assert "RATE_LIMIT_BACKEND_CONFIGURED.set(" in body

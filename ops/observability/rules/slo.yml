@@ -101,7 +101,7 @@ groups:
       # rate_limit_decisions_total kept counting — just under a different mode
       # label. This watches the gauge, not the counter.
       - alert: MRFPRateLimitDegraded
-        expr: rate_limit_backend_up == 0
+        expr: rate_limit_backend_up == 0 and rate_limit_backend_configured == 1
         for: 5m
         labels: {severity: page}
         annotations:

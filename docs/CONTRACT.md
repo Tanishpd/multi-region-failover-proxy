@@ -42,7 +42,10 @@ forbidden.
 | Variable | Default | Notes |
 |---|---|---|
 | `MRFP_MODE` | `literal` | `literal` \| `resilient`. **[BRIEF]** `literal` is the default and disables the circuit breaker, so every request during an outage walks the priority list and hits the `try/except`. See §9. |
-| `MRFP_REDIS_URL` | **none — required** | No default. Unset now genuinely refuses to boot ([ADR-020](DECISIONS.md#adr-020)); before that the comment claimed it did while the service quietly fell back to a per-process bucket. |
+| `MRFP_REDIS_URL` | **none — required unless `MRFP_REDIS_SENTINELS` is set** | No default. Unset genuinely refuses to boot ([ADR-020](DECISIONS.md#adr-020)); before that the comment claimed it did while the service quietly fell back to a per-process bucket. Sentinel is the other legal way to reach Redis ([ADR-027](DECISIONS.md#adr-027)), so the boot validator requires *one of the two* rather than this one specifically. |
+| `MRFP_REDIS_SENTINELS` | `""` | `host:port,...`. When set it WINS over `MRFP_REDIS_URL`. ([ADR-027](DECISIONS.md#adr-027)) |
+| `MRFP_REDIS_MASTER_NAME` | `mrfp-master` | Sentinel service name. Empty with sentinels set is a boot failure. |
+| `MRFP_REDIS_PASSWORD` | `""` | Applies to BOTH topologies. Omitting it against a `--requirepass` Redis used to mean silently no rate limiting. ([ADR-029](DECISIONS.md#adr-029)) |
 | `MRFP_REGIONS_FILE` | `/config/regions.yaml` | Absolute, resolved from env — never `Path(__file__).parents[N]`, which breaks in-container. |
 | `MRFP_REGION_PRIORITY` | unset | Comma-separated override of the YAML order. The *only* way to reorder regions. |
 | `MRFP_READ_TIMEOUT_MS` | `200` | **[BRIEF]** the brief's number. |
@@ -330,7 +333,9 @@ docs finds the log lines and the metrics too.
 | `region_skipped_breaker_open` | INFO | Resilient mode only: skipped *without* an attempt. Deliberately a different event from `upstream_failover` so "caught it" and "skipped it" can never be conflated in the report. |
 | `circuit_opened` / `circuit_half_open` / `circuit_closed` | WARNING / INFO / INFO | Breaker transitions. |
 | `rate_limit_rejected` | INFO | 429 returned. |
-| `rate_limit_degraded` | WARNING | Redis unreachable; serving on the local fallback bucket. |
+| `rate_limit_degraded` | WARNING / **ERROR** | Fell back off Redis. Carries `reason`: `unreachable` (an outage — what fail-open exists for, WARNING) or `auth` / `protocol` (Redis is answering and refusing us; never self-heals, so ERROR). ([ADR-029](DECISIONS.md#adr-029)) |
+| `redis_verified` | INFO / WARNING | Boot-time proof that Redis ANSWERS, not merely that it is configured. `state` is `ok` or `unreachable`. |
+| `redis_refused` | ERROR | Boot: Redis answered and rejected us. The process then exits non-zero — starting would serve unlimited traffic while reporting the limiter healthy. |
 | `stream_committed` | INFO | First byte written to the client; failover is no longer possible for this request. |
 | `stream_truncated` | ERROR | A committed stream died mid-body. Carries `emitted_bytes` and the region. |
 | `stream_preroll_failover` | WARNING | A region failed before commit, so the failover was invisible to the client. |

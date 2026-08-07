@@ -26,7 +26,7 @@ from app.idempotency import IdempotencyStore
 from app.logging_setup import configure, configure_policy, logx
 from app.middleware.context import ContextMiddleware
 from app.ratelimit.limiter import TokenBucketLimiter
-from app.redis_client import build_redis, verify_redis
+from app.redis_client import RedisMisconfigured, build_redis, verify_redis
 from app.region_client import RegionClient
 from app.regions import RegionRegistry
 from app.router import ResilientRouter
@@ -135,17 +135,33 @@ async def lifespan(app: Starlette):
     # rate limiting at all. A refusal is fatal here; an outage is not.
     redis_state = "absent"
     if redis is not None:
-        redis_state = await verify_redis(redis)
+        topology = "sentinel" if settings.redis_sentinels else "url"
+        try:
+            redis_state = await verify_redis(redis)
+        except RedisMisconfigured as exc:
+            # Emit the structured event BEFORE raising. Without this the only
+            # record of the most important boot failure in the system is a
+            # Python traceback on stderr — invisible to a log aggregator that
+            # parses `event`, and inconsistent with every other boot failure
+            # here, which goes through `config_invalid`.
+            logx("redis_refused", level=logging.ERROR, topology=topology, detail=str(exc))
+            raise
         logx(
             "redis_verified",
             state=redis_state,
             level=logging.WARNING if redis_state != "ok" else logging.INFO,
-            topology="sentinel" if settings.redis_sentinels else "url",
+            topology=topology,
         )
     app.state.redis_boot_state = redis_state
     # Seed the gauge, or a proxy that has served nothing yet reports "fallback"
     # purely because no decision has been made.
     metrics.RATE_LIMIT_BACKEND_UP.set(1 if redis_state == "ok" else 0)
+    # Whether a shared backend was ASKED FOR at all. Without this the degraded
+    # alert cannot tell "Redis is broken" from "this deployment deliberately
+    # runs without Redis", and would page forever on the latter — a permanently
+    # firing page is worse than no alert, because it teaches people to ignore
+    # the ones that matter.
+    metrics.RATE_LIMIT_BACKEND_CONFIGURED.set(0 if redis is None else 1)
 
     limiter = TokenBucketLimiter(
         redis,

@@ -146,6 +146,14 @@ RATE_LIMIT_BACKEND_UP = Gauge(
     registry=REGISTRY,
 )
 
+RATE_LIMIT_BACKEND_CONFIGURED = Gauge(
+    "rate_limit_backend_configured",
+    "1 when a shared Redis backend was configured at all. Pairs with "
+    "rate_limit_backend_up so the degraded alert can tell a broken Redis from a "
+    "deployment that deliberately runs without one.",
+    registry=REGISTRY,
+)
+
 NOSCRIPT_RECOVERIES = Counter(
     "rate_limit_noscript_recoveries_total",
     "EVALSHA NOSCRIPT recoveries. Nonzero only after a Redis restart or SCRIPT FLUSH.",
