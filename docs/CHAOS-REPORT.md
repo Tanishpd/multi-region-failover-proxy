@@ -6,9 +6,12 @@
 >
 > Regenerate with: `make chaos && make report`
 
-`chaos/report.py` rewrites **only** the regions between `<!-- AUTOGEN:BEGIN:x -->` and
-`<!-- AUTOGEN:END -->`. Prose outside those markers survives regeneration. `make docs-check` fails the
-build if a measurement appears outside an autogen block.
+`chaos/report.py` rewrites **only** two marker forms: block regions between
+`<!-- AUTOGEN:BEGIN:x -->` and `<!-- AUTOGEN:END -->`, and single-line spans between
+`<!-- AUTOGEN:INLINE:x -->` and `<!-- AUTOGEN:INLINE:END -->` — the inline form has a distinct
+terminator so a block-scanning regex can never pair across an inline span. Prose outside the markers
+survives regeneration. `make docs-check` fails the build if a measurement appears outside an autogen
+region.
 
 ---
 
@@ -62,12 +65,12 @@ omission problem. See [ARCHITECTURE §9](ARCHITECTURE.md#9-measurement-methodolo
 
 | Scenario | Fault | Code path exercised | Result |
 |---|---|---|---|
-| `stop-us-east` | `docker stop us-east-1-endpoint` | DNS withdrawal → `ConnectError`, fast fail | <!-- AUTOGEN:INLINE:result:stop-us-east -->_pending_<!-- AUTOGEN:END --> |
-| `pause-us-east` | `docker pause us-east-1-endpoint` | Connect succeeds, read hangs → `ReadTimeout` at 200 ms | <!-- AUTOGEN:INLINE:result:pause-us-east -->_pending_<!-- AUTOGEN:END --> |
-| `cascade-two` | Stop `us-east-1` + `eu-west-1` | Two failures in one request; proves a loop, not an if/else | <!-- AUTOGEN:INLINE:result:cascade-two -->_pending_<!-- AUTOGEN:END --> |
-| `total-blackout` | Stop all three | 503 contract; proxy stays alive | <!-- AUTOGEN:INLINE:result:total-blackout -->_pending_<!-- AUTOGEN:END --> |
-| `recover-us-east` | Stop, wait, start (resilient mode) | Breaker half-open probe → closed | <!-- AUTOGEN:INLINE:result:recover-us-east -->_pending_<!-- AUTOGEN:END --> |
-| `rate-limit-storm` | Exceed the bucket | Token bucket denial and refill | <!-- AUTOGEN:INLINE:result:rate-limit-storm -->_pending_<!-- AUTOGEN:END --> |
+| `stop-us-east` | `docker stop us-east-1-endpoint` | DNS withdrawal → `ConnectError`, fast fail | <!-- AUTOGEN:INLINE:result:stop-us-east -->_pending_<!-- AUTOGEN:INLINE:END --> |
+| `pause-us-east` | `docker pause us-east-1-endpoint` | Connect succeeds, read hangs → `ReadTimeout` at 200 ms | <!-- AUTOGEN:INLINE:result:pause-us-east -->_pending_<!-- AUTOGEN:INLINE:END --> |
+| `cascade-two` | Stop `us-east-1` + `eu-west-1` | Two failures in one request; proves a loop, not an if/else | <!-- AUTOGEN:INLINE:result:cascade-two -->_pending_<!-- AUTOGEN:INLINE:END --> |
+| `total-blackout` | Stop all three | 503 contract; proxy stays alive | <!-- AUTOGEN:INLINE:result:total-blackout -->_pending_<!-- AUTOGEN:INLINE:END --> |
+| `recover-us-east` | Stop, wait, start (resilient mode) | Breaker half-open probe → closed | <!-- AUTOGEN:INLINE:result:recover-us-east -->_pending_<!-- AUTOGEN:INLINE:END --> |
+| `rate-limit-storm` | Exceed the bucket | Token bucket denial and refill | <!-- AUTOGEN:INLINE:result:rate-limit-storm -->_pending_<!-- AUTOGEN:INLINE:END --> |
 
 ---
 
@@ -109,7 +112,7 @@ _pending_
 |---|---|---|
 | A1 | Zero client-side errors | |
 | A2 | Zero 5xx, zero 429 surfaced to the client | |
-| A3 | Zero requests *dispatched* to us-east-1 during the outage | |
+| A3 | Zero requests **served by** us-east-1 during the outage (send-time keyed; in literal mode every request is still *attempted* against it — that's A13) | |
 | A4 | First successful eu-west-1 response within 1500 ms of the stop completing | |
 | A5 | Transition p99 ≤ baseline p99 + 3 × 200 ms | |
 | A8 | ≥1 `upstream_failover` log line with a non-empty `error_class` | |
@@ -119,6 +122,9 @@ _pending_
 | A12 | Achieved RPS ≥ 90 % of target | |
 | A13 | `upstream_failover` lines ≥ 95 % of requests that failed over | |
 <!-- AUTOGEN:END -->
+
+_Assertion ids are global across the scenario matrix: A6 and A7 belong to the `pause-us-east` and
+`cascade-two` scenarios and appear in their sections of the generated per-run report._
 
 **On A13.** This is the assertion that protects the project brief from its own sophistication. If a
 future change causes regions to be skipped (breaker) rather than attempted, the `try`/`except` stops
@@ -163,9 +169,9 @@ _pending_
 | `region_skipped_breaker_open` log lines | | |
 <!-- AUTOGEN:END -->
 
-The breaker should reduce latency during the outage — that's what it's for. It should also reduce the
-`upstream_failover` count, because skipped regions are never attempted. Both effects are expected;
-reporting them separately is what keeps "we caught it" and "we skipped it" from being conflated.
+The breaker should reduce latency during the outage — that's what it's for. It should also reduce
+the `upstream_failover` count, because skipped regions are never attempted
+([ADR-009](DECISIONS.md#adr-009)).
 
 ---
 

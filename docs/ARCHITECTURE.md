@@ -13,10 +13,10 @@ flowchart LR
   C[client / chaos flood] -->|POST /v1/infer| P
   subgraph net["docker network mrfp-net · project mrfp"]
     P["mrfp-proxy :8000<br/>FastAPI · uvicorn · 1 worker"]
-    R[("redis :6379<br/>cache-only, every key TTL'd")]
-    E1["us-east-1-endpoint<br/>base 15ms · priority 1"]
-    E2["eu-west-1-endpoint<br/>base 60ms · priority 2"]
-    E3["ap-southeast-1-endpoint<br/>base 150ms · priority 3"]
+    R[("redis :6380→6379<br/>cache-only, every key TTL'd")]
+    E1["us-east-1-endpoint :9001<br/>base 15ms · priority 1"]
+    E2["eu-west-1-endpoint :9002<br/>base 60ms · priority 2"]
+    E3["ap-southeast-1-endpoint :9003<br/>base 150ms · priority 3"]
   end
   P -->|EVALSHA token_bucket.lua| R
   P -.->|"connect 100ms / read 200ms"| E1
@@ -32,7 +32,7 @@ The simulated latencies (15 / 60 / 150 ms) are not decoration. Without them, fai
 the circuit breaker has nothing to optimise; with them, "us-east is the primary" is a statement about
 physics rather than a config line.
 
-The proxy runs **one uvicorn worker**, pinned deliberately. `prometheus-client` without
+The proxy runs **one uvicorn worker**, pinned. `prometheus-client` without
 `PROMETHEUS_MULTIPROC_DIR` reports only one worker's counters, so multiple workers would silently
 under-report every metric in the chaos report. One worker also means the circuit breaker can live in
 process memory instead of needing distributed state — see [ADR-008](DECISIONS.md#adr-008).
@@ -73,7 +73,7 @@ the metrics and `request.state.request_id` is unset when the 429 body is built.
 
 | # | Stage | Responsibility |
 |---|---|---|
-| 1 | `RequestIdMiddleware` | Honour an inbound `X-Request-Id` or mint one; bind it to a `ContextVar` so every log line carries it. Honouring inbound is load-bearing — the chaos harness generates the id client-side and uses it to join its own CSV against the proxy's logs. |
+| 1 | `RequestIdMiddleware` | Honour an inbound `X-Request-Id` or mint one; bind it to a `ContextVar` so every log line carries it. Honouring inbound matters: the chaos harness generates the id client-side and uses it to join its own CSV against the proxy's logs. |
 | 2 | `ClientIdentityMiddleware` | Resolve the real client IP (§6). Uvicorn runs *without* `--proxy-headers` so there is exactly one owner of this logic. |
 | 3 | `RateLimitMiddleware` | One `EVALSHA`. On deny, return 429 **without touching an upstream** — a rate-limited request must not cost a region anything. |
 | 4 | Admission gate | `asyncio.Semaphore(128)`. If saturated, 503 immediately. Bodies are buffered, so unbounded concurrency is an unbounded memory commitment. |
@@ -87,10 +87,10 @@ the metrics and `request.state.request_id` is unset when the 429 body is built.
 
 ```
 for each region in priority order:
-    if no time left in the 900ms budget      -> stop
+    if no time left in the 900 ms budget     -> stop
     if breaker is open (resilient mode only) -> skip, no attempt made
     if the previous attempt put bytes on the wire and this request isn't replayable -> stop
-    try:  send with a 200ms read timeout
+    try:  send with a 200 ms read timeout
     on success -> return
     on failure -> classify, log, record, move to the next region
 return 503 describing every attempt
@@ -141,7 +141,7 @@ on the wire, and they are *not* interchangeable.
 | `docker kill` | `ReadError` / `RemoteProtocolError` — RST on pooled sockets | MAYBE_SENT | ~2 ms | only if idempotent |
 | `docker pause` | `ReadTimeout` — the kernel still ACKs the SYN from the listen backlog, so connect *succeeds*, then nothing | MAYBE_SENT | **200 ms** | only if idempotent |
 | chaos `blackhole` | `ReadTimeout` | MAYBE_SENT | 200 ms | only if idempotent |
-| `docker network disconnect` | `ConnectTimeout` — SYN goes unanswered | NOT_SENT | 100 ms | yes |
+| `docker network disconnect` | `ConnectError` — the endpoint's DNS record is withdrawn, same as `stop` | NOT_SENT | ~2 ms | yes |
 | pool saturated | `PoolTimeout` | NOT_SENT | 50 ms | yes |
 
 **The headline: the brief's own chaos command cannot exercise the brief's own timeout.**
@@ -151,8 +151,11 @@ their latency signatures side by side.
 
 Two library facts that trip people up:
 
-- `httpx.ConnectTimeout` is **not** a subclass of `httpx.ConnectError`. Catching only `ConnectError`
-  misses the network-partition case entirely. The broad catch is `httpx.HTTPError`.
+- `httpx.ConnectTimeout` is **not** a subclass of `httpx.ConnectError`, despite the names. The broad
+  catch is `httpx.HTTPError`. A genuine unanswered-SYN `ConnectTimeout` never occurs naturally in
+  this stack — Docker withdraws the DNS record along with the endpoint, so partitions here fail like
+  `stop` — but production networks produce it constantly (firewalls dropping packets while DNS still
+  resolves), and the classifier handles it.
 - `classify()` **re-raises** anything outside httpx's exception tree. An unexpected exception is *our*
   bug, and silently counting it as an upstream failure would blame a healthy region for our defect.
 
@@ -192,7 +195,8 @@ sequenceDiagram
     Note over R: two requests served, one token spent
 ```
 
-Under the chaos flood this isn't theoretical — it happens on essentially every burst. `EVAL` runs the
+Under the chaos flood this will not stay theoretical — any concurrent burst can interleave the
+GET/SET pair. `EVAL` runs the
 whole read-refill-decide-debit sequence inside Redis's single-threaded execution, so it is atomic by
 construction. One round trip, no lock, no watch/retry loop.
 
@@ -207,20 +211,13 @@ tokens = min(capacity, tokens + elapsed_seconds × refill_rate)
 allow  = tokens >= cost
 ```
 
-Four details that are each a real bug if you skip them:
+Four correctness details — persist the fraction, clamp at capacity, TTL ≥ full-refill time, refresh
+the TTL on deny — are each a real bug if skipped; the mechanics and failure modes are worked through
+in [LEARNING §1](LEARNING.md#1-token-buckets-and-why-not-a-fixed-window).
 
-- **Persist the fraction.** At 20 tokens/s, a 10 ms gap accrues 0.2 tokens. Floor that and it's 0 —
-  forever. A client polling every 10 ms would never refill at all.
-- **Clamp at capacity.** Otherwise an hour of idleness accrues 72,000 tokens and the limit is
-  meaningless on the next burst.
-- **TTL ≥ full-refill time.** If the key expires sooner, the next request sees no key, assumes a
-  fresh full bucket, and anyone pacing just slower than the TTL gets unlimited capacity for free.
-- **Refresh the TTL on deny too.** A continuously rate-limited client would otherwise let its key
-  expire and come back with a full bucket — being blocked would *reward* it.
-
-Returns are integers only: Lua→RESP conversion truncates floats, so token counts come back
-multiplied by 1000. Timestamps are formatted with `%.0f` because Lua 5.1's `tostring` uses `%.14g`,
-which renders a 13-digit millisecond epoch as `1.7532e+12`.
+Returned values are integers only (Lua→RESP conversion truncates floats, so token counts come back
+multiplied by 1000), and timestamps are written with `string.format('%.0f', …)` — the two Lua
+formatting traps behind those rules are also unpacked in LEARNING §1.
 
 Time comes from Redis's own `TIME` command rather than the client, so there is one clock regardless
 of how many callers exist and no client-side skew.
@@ -234,14 +231,10 @@ a generation counter so exactly one caller re-uploads and the rest re-check and 
 
 ### When Redis is down
 
-Fail **open** by default: serve traffic without limiting. The reasoning is that this is a resilience
-project, and making the rate limiter a hard dependency would mean adding a new single point of
-failure to a system whose entire purpose is not having one.
-
-But naive fail-open is still a latency outage — every request pays the socket timeout before giving
-up. So Redis sits behind the *same breaker class* as the regions: after N failures it stops being
-consulted at all, and an in-process fallback bucket takes over. `X-RateLimit-Mode` reports which of
-`redis` / `local` / `open` actually made the decision.
+Redis failure fails **open**, behind the same breaker class as the regions, with an in-process
+fallback bucket — because naive fail-open is still a latency outage: every request pays the socket
+timeout before giving up. `X-RateLimit-Mode` reports which of `redis` / `local` / `open` actually
+decided. The fail-open vs fail-closed argument is [ADR-013](DECISIONS.md#adr-013).
 
 ---
 
@@ -294,15 +287,14 @@ first few requests.
 Why it's **off by default**: it also removes the brief's requirement from the demo. Once the breaker
 opens, requests are *skipped* rather than *attempted*, so the `try`/`except` stops firing. Under a
 flood, the graded behaviour would appear in ~5 of ~3000 requests. `MRFP_MODE=literal` is the default
-so the requirement is genuinely exercised, and `region_skipped_breaker_open` is a distinct log event
-from `upstream_failover` so the two can never be conflated in the report.
+so the requirement is genuinely exercised ([ADR-009](DECISIONS.md#adr-009)).
 
 Implementation notes: `HALF_OPEN` admits exactly one probe (single-flight), or every request in
 flight would stampede a recovering region. Opening the breaker also purges that region's connection
 pool — stale keep-alive sockets to a restarted container are exactly what produce
-`RemoteProtocolError`. That purge is scheduled with `asyncio.create_task` and held in a module-level
-set; a coroutine returned from a plain synchronous callback is never awaited, so the purge would
-silently never happen.
+`RemoteProtocolError`. The purge is scheduled via `asyncio.create_task` with the task held in a
+module-level set; [LEARNING §5](LEARNING.md#5-circuit-breakers-and-the-arithmetic-that-justifies-them)
+explains why anything less silently drops it.
 
 An **active health poller** was considered and cut. It would mark a region down before any real
 request failed, which is better engineering and worse for this brief — the `except` block would never
@@ -322,7 +314,8 @@ reconstruct the decision afterwards: `from_region`, `to_region`, `error_class`, 
 
 Metrics at `/metrics`: `proxy_requests_total`, `proxy_failover_total{from_region,to_region,code}`,
 `proxy_upstream_latency_seconds` (bucket edges straddle 0.2 so the timeout is visible in the
-histogram), `proxy_circuit_state`, `rate_limit_rejected_total`, `rate_limit_mode_total`.
+histogram), `proxy_circuit_state`, `rate_limit_rejected_total`, `rate_limit_mode_total`,
+`rate_limit_noscript_recoveries_total`.
 
 Prometheus and Grafana **containers** were cut — see [ADR-010](DECISIONS.md#adr-010). `/metrics`
 stays, because the chaos assertions read it.
@@ -331,19 +324,12 @@ stays, because the chaos assertions read it.
 
 ## 9. Measurement methodology
 
-The chaos harness is an **open-loop** pacer: it issues requests on a fixed schedule
-(`next_at += 1/rps`) regardless of whether earlier ones have returned. A closed-loop worker pool
-would stop issuing while blocked, so the latency spike during failover would simply not appear in the
-data — the classic coordinated-omission error, which makes a resilience demo look better than it is
-by deleting the evidence.
-
-The harness also refuses to report results it can't stand behind: assertion A12 fails the run if
-achieved throughput falls below 90 % of target, and the client timeout is 5 s — roughly 25× the
-proxy's 200 ms — so a client-side abort can never be misread as a proxy failure.
-
-Assertions about *when* a request was routed are evaluated on **send** time, not receive time. A
-request correctly dispatched to a healthy region microseconds before the kill lands afterwards;
-keying on receive time makes the flagship assertion fail for correct behaviour.
+Three rules keep the harness honest: it is an **open-loop** pacer (`next_at += 1/rps`, issued on
+schedule whether or not earlier requests returned); routing assertions are keyed on **send** time,
+not receive time; and a run that achieves under 90 % of target throughput refuses to report at all,
+with a 5 s client timeout — ~25× the proxy's — so a client-side abort can never be misread as a
+proxy failure. Why each rule matters (coordinated omission, the send-time trap) is worked through in
+[LEARNING §6](LEARNING.md#6-chaos-engineering-pick-the-fault-deliberately).
 
 ---
 

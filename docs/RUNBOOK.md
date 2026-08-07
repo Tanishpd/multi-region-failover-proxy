@@ -46,6 +46,7 @@ started at `up` time would expire during it and report a false failure.
 | `make test` | Full suite: unit + integration (needs Redis) + e2e (needs the stack). |
 | `make chaos` | The brief's scenario end to end, with assertions. Exits non-zero on failure. |
 | `make chaos-<name>` | One named scenario (§4). |
+| `make report` | Regenerate the AUTOGEN blocks in docs/CHAOS-REPORT.md from `artifacts/latest/`. |
 | `make bench` | ApacheBench throughput cross-check. Must use `-p` — `/v1/infer` is POST-only. |
 | `make lint` / `make fmt` | ruff. |
 | `make docs-check` | Fails if any measurement sits outside an `AUTOGEN` block, or a TODO remains. |
@@ -70,13 +71,13 @@ recovery.
 
 ### `pause-us-east` — the one that proves the timeout
 
-`docker pause` freezes the process without closing its sockets. The kernel still completes the TCP
-handshake from the listen backlog, so connect *succeeds* and then nothing comes back.
+`docker pause` freezes the process without closing its sockets: connect succeeds, the read hangs,
+and the 200 ms timeout fires (mechanism:
+[LEARNING §3](LEARNING.md#3-failure-modes-are-not-interchangeable)).
 
 **What you should see:** transition p50 around 200 ms instead of ~2 ms, and `error_class: ReadTimeout`.
 
-**Run both and compare.** Two failure modes with visibly different latency signatures through one
-code path is the most interesting output this project produces.
+**Run both and compare** — two failure modes, visibly different latency signatures, one code path.
 
 ### `cascade-two` — proves it's a loop, not an if/else
 
@@ -102,7 +103,7 @@ bucket refills at the configured rate.
 | Scenario | Command | Induces |
 |---|---|---|
 | Abrupt kill | `docker kill us-east-1-endpoint` | RST on pooled sockets → `RemoteProtocolError` |
-| Network partition | `docker network disconnect mrfp-net us-east-1-endpoint` | SYN blackhole → `ConnectTimeout` at 100 ms |
+| Network partition | `docker network disconnect mrfp-net us-east-1-endpoint` | DNS record withdrawn → fast `ConnectError`, same signature as `stop` |
 | Slow region | `curl -XPOST localhost:9001/admin/chaos -H 'X-Admin-Token: dev-chaos' -d '{"mode":"slow","ms":500}'` | Latency without failure |
 | Region 5xx | same, `{"mode":"error"}` | Response-level failure, not transport |
 | Blackhole | same, `{"mode":"blackhole"}` | `ReadTimeout` without pausing the container |
@@ -136,10 +137,8 @@ docker compose logs --no-log-prefix proxy \
   | jq -c 'select(.event|startswith("rate_limit_"))'
 ```
 
-**`upstream_failover` vs `region_skipped_breaker_open`** are deliberately different events.
-The first means "we tried, it failed, we caught it" — the graded behaviour. The second means "we
-didn't even try because the breaker was open". Conflating them would let a report claim the `except`
-block is working when it never ran.
+**`upstream_failover`** = attempted and caught (the graded behaviour);
+**`region_skipped_breaker_open`** = never attempted ([ADR-009](DECISIONS.md#adr-009)).
 
 ---
 
@@ -170,7 +169,7 @@ block is working when it never ran.
 | Latency stays high for the whole outage | Expected in `literal` mode — that's the tax the breaker removes | `X-Breaker-State: n/a` | Re-run with `MRFP_MODE=resilient` |
 | Breaker never opens | You're in `literal` mode (the default) | `grep region_skipped_breaker_open` returns nothing | Intentional. `MRFP_MODE=resilient` to enable |
 | A region "won't die" during chaos | uvicorn graceful shutdown waiting on keep-alive sockets | Time `docker stop` — should be < 1.5 s | Confirm `--timeout-graceful-shutdown 0` and `stop_grace_period: 2s` |
-| Region resurrects itself mid-run | A `restart:` policy | `docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' us-east-1-endpoint` | Must be `no` |
+| Region resurrects itself mid-run | A `restart:` policy plus a region *crash* (policies don't fire after `docker stop`), or Docker Desktop restarted with `always` set | `docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' us-east-1-endpoint` | Must be `no` |
 | `make chaos` reports PASS but output looked wrong | GNU Make 3.81 ignores `.SHELLFLAGS`, so a failing pipeline exits 0 | `make --version` | Recipes must be one command delegating to `ops/scripts/*.sh` |
 | Healthchecks never go healthy | A healthcheck using `curl` — `python:slim` doesn't have it | `docker inspect --format '{{json .State.Health}}' <name>` | Use the `python -c urllib.request` form |
 | Timings flap wildly | Image built for the wrong architecture | `docker image inspect mrfp/proxy:dev -f '{{.Architecture}}'` | Rebuild; never set `platform: linux/amd64` |
@@ -181,7 +180,7 @@ block is working when it never ran.
 
 ## 8. Safety notes
 
-This machine runs a **real Redis on 6379** with real data. Guardrails, all deliberate:
+This machine runs a **real Redis on 6379** with real data. Guardrails:
 
 - The container publishes on **6380**. `MRFP_REDIS_URL` has no default, so a misconfiguration fails
   loudly instead of connecting to your Redis.

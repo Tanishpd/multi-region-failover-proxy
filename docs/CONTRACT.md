@@ -56,6 +56,8 @@ forbidden.
 | `MRFP_RL_REFILL_PER_SEC` | `20` | |
 | `MRFP_RL_TTL_PAD_MS` | `2000` | Added to the computed full-refill TTL. |
 | `MRFP_RL_FAIL_MODE` | `open` | `open` \| `closed`. Posture when Redis is unreachable. |
+| `MRFP_BREAKER__FAILURE_THRESHOLD` | `5` | Resilient mode only: consecutive failures before the breaker opens. |
+| `MRFP_BREAKER__COOLDOWN_S` | `5` | Resilient mode only: OPEN → HALF_OPEN delay; doubles after a failed probe. |
 | `MRFP_LOG_LEVEL` | `INFO` | |
 | `MRFP_CHAOS_MODE` | `0` | When `1`, `X-Chaos-Bypass` with the right token skips rate limiting. |
 | `MRFP_CHAOS_TOKEN` | unset | Required if `MRFP_CHAOS_MODE=1`. |
@@ -131,12 +133,16 @@ defensible, and it is why the chaos harness can diff responses across a failover
 Chaos modes are exactly three: `slow` (add latency), `error` (return 503), `blackhole` (accept the
 connection and never respond). No others.
 
+`POST /admin/chaos` body: `{ "mode": "slow" | "error" | "blackhole", "ms": <int> }` — `ms` is the
+added latency, required for `slow` and ignored otherwise. `GET /admin/chaos` returns
+`{ "mode": <mode | null>, "ms": <int | null> }`.
+
 ---
 
 ## 4. Response headers
 
-Set by the proxy on **success and on the 503** — a failure response that doesn't explain itself is
-useless during a demo.
+Set by the proxy on success **and on error responses (429 and 503)** — a failure response that
+doesn't explain itself is useless during a demo.
 
 | Header | Example | Meaning |
 |---|---|---|
@@ -176,7 +182,7 @@ Both 429 and 503 return `application/problem+json` (RFC 9457):
 ## 5. Container, network, and port map
 
 **[BRIEF]** The three region container names are fixed by the project brief. The chaos script runs
-`docker stop us-east-1-endpoint` literally, so these are load-bearing strings, not labels.
+`docker stop us-east-1-endpoint` literally, so these strings are part of the brief, not labels.
 
 | Container | Image | Host port | In-network |
 |---|---|---|---|
@@ -214,11 +220,7 @@ rl:v1:{<dimension>:<identity>}:<layer>
 
 Example: `rl:v1:{ip:127.0.0.1}:burst`
 
-Databases: **0** = application. **15** = pytest, and *only* pytest.
-
-> The test fixture asserts `db == 15` **and** reads a sentinel key that our own container wrote,
-> before it will run `FLUSHDB`. It never calls `FLUSHALL`. This exists because the developer machine
-> has a real Redis with real data one port away.
+Databases: **0** = application. **15** = pytest, and *only* pytest — safety rails in §10.
 
 ---
 
@@ -265,6 +267,17 @@ docs finds the log lines and the metrics too.
 | `rate_limit_rejected` | INFO | 429 returned. |
 | `rate_limit_degraded` | WARNING | Redis unreachable; serving on the local fallback bucket. |
 
+### Failure classes and codes
+
+These strings cross every boundary: they appear in `X-Failover-Path`, in the `code` / `fclass`
+fields of `upstream_attempt_failed`, and as the `code` label on `proxy_failover_total`.
+
+- `fclass` ∈ **`NOT_SENT`** (no bytes reached the region; replay is free) |
+  **`MAYBE_SENT`** (bytes may have arrived; replay is safe only because inference is deterministic).
+- `code` ∈ `ok`, `connect_error`, `connect_timeout`, `read_timeout`, `pool_timeout`,
+  `protocol_error`, `read_error`, `http_<status>` (e.g. `http_503`), `attempt_deadline`,
+  `budget_exhausted`, `open_skipped`, `half_open_skipped`, `replay_blocked`.
+
 ---
 
 ## 9. Brief-fidelity invariants
@@ -301,3 +314,4 @@ for. They are not stylistic preferences.
 | Date | Change |
 |---|---|
 | 2026-07-27 | Initial freeze, before any application code. |
+| 2026-08-07 | Post-review revision: headers scoped to 429 as well as 503; breaker env vars added; failure class/code vocabulary added (§8); `/admin/chaos` body schema added (§3). |

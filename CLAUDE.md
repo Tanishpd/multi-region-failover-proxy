@@ -62,8 +62,9 @@ the bug.
 
 ## 4. Commands
 
-The Makefile is the only supported command surface. Do not invent ad-hoc `docker compose` or
-`pytest` invocations in docs or scripts — add a target instead.
+The Makefile is the only supported command surface for lifecycle, build, and test steps — do not
+invent ad-hoc `docker compose` or `pytest` invocations for those; add a target instead. Read-only
+inspection one-liners in docs (`docker compose logs | jq`, `docker compose ps`) are fine.
 
 ```
 make doctor       # preflight: daemon, ports, disk, arch, make version
@@ -74,8 +75,14 @@ make test-unit    # runs with the Docker daemon OFF
 make test         # full suite; needs the stack
 make chaos        # the brief's scenario: flood + docker stop + recovery
 make chaos-%      # one named scenario, e.g. make chaos-pause-us-east
+make report       # regenerate the AUTOGEN blocks in docs/CHAOS-REPORT.md from artifacts/latest
 make logs         # follow proxy logs
+make ps           # what's running
 make health       # one-line status per region
+make bench        # ApacheBench cross-check (POST payload via -p)
+make lint         # ruff check
+make fmt          # ruff format
+make docs-check   # fail on TODOs or numbers outside AUTOGEN blocks
 make reset        # flush app Redis keys (db 0 only)
 ```
 
@@ -86,7 +93,7 @@ make reset        # flush app Redis keys (db 0 only)
 ```mermaid
 flowchart LR
   C[client] --> P[mrfp-proxy :8000]
-  P -->|EVALSHA| R[(redis :6379)]
+  P -->|EVALSHA| R[(redis :6380→6379)]
   P -.->|1st| E1[us-east-1-endpoint]
   P -.->|2nd| E2[eu-west-1-endpoint]
   P -.->|3rd| E3[ap-southeast-1-endpoint]
@@ -147,9 +154,10 @@ session.
 
 - `add_middleware` **prepends**. The last one registered is the outermost. Register
   `RateLimit` → `ClientIdentity` → `RequestId` to get the documented execution order.
-- Middleware added with `add_middleware` must subclass `BaseHTTPMiddleware`. Defining
-  `async def dispatch` on a plain class makes Starlette treat it as raw ASGI, `dispatch` never runs,
-  and rate limiting silently does not exist.
+- `add_middleware` accepts any ASGI middleware, but `dispatch` is only ever called by
+  `BaseHTTPMiddleware`'s machinery. A pass-through ASGI class that also defines `async def dispatch`
+  never runs it — requests sail straight through and rate limiting silently does not exist.
+  Subclass `BaseHTTPMiddleware` when you want dispatch semantics.
 
 **Python**
 
@@ -167,8 +175,9 @@ session.
   Shared region env lives in `region/region.env` via `env_file:`, not in the anchor.
 - `env_file:` pointing at a gitignored file is a hard error on a fresh checkout. Only reference
   committed env files.
-- `restart:` policies fight `docker stop` — regions use `restart: "no"`, or a resurrected container
-  invalidates the chaos timeline.
+- Regions use `restart: "no"`. A `restart:` policy would resurrect a region that *crashes* mid-run
+  (and `always` revives stopped containers when the daemon restarts). Policies are ignored after a
+  manual `docker stop`, so the chaos stop itself is safe either way.
 - Regions set `--timeout-graceful-shutdown 0`. Without it, uvicorn waits on the proxy's warm
   keep-alive sockets and `docker stop` blocks for the full grace period *while still serving 200s* —
   the demo shows no failover and the router looks broken.
@@ -178,8 +187,10 @@ session.
 **Redis**
 
 - Lua → RESP conversion **truncates floats**. Return integers only (tokens are returned ×1000).
-- `tostring(now_ms)` in Lua 5.1 uses `%.14g`, so a 13-digit millisecond timestamp becomes
-  `1.7532e+12`. Use `string.format('%.0f', now_ms)`.
+- `tostring()` in Lua 5.1 uses `%.14g`: a bare 13-digit millisecond epoch survives, but anything
+  with ≥15 significant digits — a microsecond epoch, or a ms epoch carrying a fraction from `TIME`'s
+  µs field — is mangled (`1.7532345678901e+15`, `1753234567890.1`). Use
+  `string.format('%.0f', now_ms)`.
 - Persist **fractional** tokens. Flooring starves the bucket permanently: at 20 tok/s a 10 ms gap
   accrues 0.2 tokens, which floors to 0 forever.
 - Bucket TTL must be **≥ the exact full-refill time**, or expiry silently hands a free full bucket to

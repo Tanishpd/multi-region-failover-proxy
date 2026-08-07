@@ -18,20 +18,25 @@ Three failure modes, three different code paths, one `except` clause that has to
 
 > **Project status: scaffolding.** The documentation was written before the code, deliberately — see
 > [ADR-001](docs/DECISIONS.md#adr-001-contract-first). Implementation follows the phase order in
-> [CLAUDE.md §9](CLAUDE.md#9-build-order). Sections below marked _pending_ contain no measurements
-> yet, because no run has happened yet. Nothing in this repository quotes a number that a script
-> didn't produce.
+> [CLAUDE.md §9](CLAUDE.md#9-build-order). No measured result in this repository was written by
+> hand: sections marked _pending_ are empty because no run has happened, and the few example
+> transcripts below are labelled illustrative.
+>
+> **Progress:** ☑ 0 contract + docs · ☐ 1 regions + compose · ☐ 2 proxy failover · ☐ 3 chaos
+> `stop-us-east` · ☐ 4 token bucket · ☐ 5 scenario matrix + `/metrics` · ☐ 6 breaker · ☐ 7 tests ·
+> ☐ 8 generated report
 
 ---
 
 ## The four requirements, and where to look
 
-This project was built to a brief. Each requirement maps to a specific place in the code:
+This project is built to a brief. Each requirement maps to a location frozen in
+[docs/CONTRACT.md](docs/CONTRACT.md); implementation lands in the phase order above:
 
-| # | Requirement | Implemented in | Prove it with |
+| # | Requirement | Lives in | Prove it with |
 |---|---|---|---|
 | 1 | Three containers named `us-east-1-endpoint`, `eu-west-1-endpoint`, `ap-southeast-1-endpoint`, plus Redis | `docker-compose.yml` (`container_name:` on each), `region/app/main.py` | `docker compose ps --format '{{.Name}}'` |
-| 2 | A Redis token bucket, decremented per IP per request, returning 429 at zero | `proxy/app/ratelimit/lua/token_bucket.lua` → `ratelimit/limiter.py` → `middleware/ratelimit_mw.py` | 30 requests in a loop → 20×`200` then 10×`429` |
+| 2 | A Redis token bucket, decremented per IP per request, returning 429 at zero | `proxy/app/ratelimit/lua/token_bucket.lua` → `ratelimit/limiter.py` → `middleware/ratelimit_mw.py` | a 30-request parallel burst → 20×`200` then 10×`429` |
 | 3 | Prioritise `us-east-1`; `httpx` with a ~200 ms timeout; wrapped in `try`/`except` | `proxy/app/router.py:ResilientRouter.route`, timeout built in `region_client.py:_build` | `make chaos-pause-us-east` → transition p50 ≈ 200 ms |
 | 4 | A script that runs `docker stop us-east-1-endpoint` during a flood; the `except` catches, logs, and routes to `eu-west-1` | `chaos/run.py`, `chaos/docker_ctl.py`, caught in `router.py`, logged as `upstream_failover` | `make chaos` |
 
@@ -111,8 +116,10 @@ curl -si localhost:8000/v1/infer \
 ```
 HTTP/1.1 200 OK
 X-Served-By-Region: eu-west-1
-X-Failover-Path: us-east-1:connect_error(2.1ms),eu-west-1:ok(63.4ms)
+X-Failover-Path: us-east-1:connect_error(~2ms),eu-west-1:ok(~60ms)
 ```
+
+_(illustrative output — the header shape is contractual, the numbers are not measurements)_
 
 Then run the real thing:
 
@@ -129,15 +136,20 @@ If you're showing this to someone, this is the order that lands.
 1. **`make chaos`** — a request flood is running, a region gets killed mid-flight, and a per-second
    timeline prints showing traffic move from `us-east-1` to `eu-west-1` in one second and back after
    recovery. Every assertion prints PASS/FAIL and the process exits non-zero if any failed.
-2. **`docker compose logs proxy | jq -c 'select(.event=="upstream_failover")'`** — the `except` block,
-   caught red-handed, with the exception class and the elapsed time. `error_class` is
-   `ConnectError`, not a timeout. That surprises people.
+2. **`docker compose logs --no-log-prefix proxy | jq -c 'select(.event=="upstream_failover")'`** —
+   the `except` block, caught red-handed, with the exception class and the elapsed time.
+   `error_class` is `ConnectError`, not a timeout.
 3. **`make chaos-pause-us-east`** — same experiment with `docker pause` instead of `stop`. Now the
    transition p50 sits at ~200 ms because this one *is* a timeout. Two failure modes, visibly
    different latency signatures, one code path.
-4. **The 429 loop** — 30 requests, 20 succeed, 10 are rejected; then
-   `redis-cli -p 6380 HGETALL 'rl:v1:{ip:127.0.0.1}:burst'` shows the bucket with *fractional*
-   tokens, which is a small detail with a long explanation ([LEARNING.md](docs/LEARNING.md)).
+4. **The 429 burst** — 30 requests fired in parallel
+   (`seq 1 30 | xargs -P 30 -I{} curl -s -o /dev/null -w '%{http_code}\n' localhost:8000/v1/infer
+   -H 'content-type: application/json' -d '{"prompt":"x"}' | sort | uniq -c`): 20 succeed, 10 are
+   rejected. The burst has to land inside one refill interval — a slow sequential loop refills as it
+   goes and hides the 429s. Then find the bucket with
+   `redis-cli -p 6380 --scan --pattern 'rl:v1:*'` (the identity comes from `/debug/whoami`; on
+   Docker Desktop it is usually the bridge gateway, not `127.0.0.1`) and `HGETALL` it to see
+   *fractional* tokens — a small detail with a long explanation ([LEARNING.md](docs/LEARNING.md)).
 5. **Stop all three regions** — clean `503` with `X-Failover-Path` showing all three attempts, and
    the proxy itself still answers `/healthz`. Degrading is not the same as crashing.
 
@@ -147,20 +159,19 @@ If you're showing this to someone, this is the order that lands.
 
 _Pending — no chaos run has been executed yet._
 
-Once `make chaos` runs, [docs/CHAOS-REPORT.md](docs/CHAOS-REPORT.md) is regenerated from the raw
-artifacts. Only the regions between `AUTOGEN` markers are rewritten, so the prose survives and the
-numbers can't be hand-edited. If you see a measurement anywhere in this repository, a script put it
-there.
+Once `make chaos` has run, `make report` regenerates [docs/CHAOS-REPORT.md](docs/CHAOS-REPORT.md)
+from the raw artifacts. Only the regions between `AUTOGEN` markers are rewritten, so the prose
+survives and the numbers can't be hand-edited.
 
 ---
 
 ## Worth reading, in order
 
 1. [docs/CONTRACT.md](docs/CONTRACT.md) — every name that crosses a boundary, frozen before the code
-2. `proxy/app/router.py` — the failover loop
-3. `proxy/app/failures.py` — the exception taxonomy, and what each failure *means*
-4. `proxy/app/ratelimit/lua/token_bucket.lua` — atomic refill/decide/debit/expire in one round trip
-5. `chaos/run.py` — the harness and its assertions
+2. `proxy/app/router.py` — the failover loop _(Phase 2 — not yet written)_
+3. `proxy/app/failures.py` — the exception taxonomy, and what each failure *means* _(Phase 2 — not yet written)_
+4. `proxy/app/ratelimit/lua/token_bucket.lua` — atomic refill/decide/debit/expire in one round trip _(Phase 4 — not yet written)_
+5. `chaos/run.py` — the harness and its assertions _(Phase 3 — not yet written)_
 6. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the reasoning behind all of the above
 
 ---
@@ -183,15 +194,16 @@ The ones you'd actually change:
 
 ## Troubleshooting
 
+The three things a first-time runner actually hits:
+
 | Symptom | Cause | Fix |
 |---|---|---|
 | `Cannot connect to the Docker daemon` | Docker Desktop isn't running | `open -a Docker`, wait ~30 s, `make doctor` |
-| Redis container won't bind | A native `redis-server` already owns 6379 | Nothing to fix — ours publishes on **6380** by design |
-| `make chaos` says PASS but something looked wrong | macOS ships GNU Make 3.81, where `.SHELLFLAGS` is silently ignored | Already handled: recipes delegate to `ops/scripts/*.sh`. If you add a target, follow that pattern |
 | Everything 429s during a demo | All requests share one bucket — the proxy sees the Docker bridge gateway as the peer | `curl localhost:8000/debug/whoami` to see the resolved identity; use the chaos bypass token for load runs |
 | Every request takes ~200 ms after a region dies | Expected in `literal` mode — that's the cost the breaker exists to remove | Re-run with `MRFP_MODE=resilient` to see the difference |
-| A region "won't die" during chaos | uvicorn graceful shutdown waiting on keep-alive sockets | Regions set `--timeout-graceful-shutdown 0`; check it survived an edit |
-| Containers are slow and timings flap | An image got built for the wrong architecture | This is arm64; never set `platform: linux/amd64` |
+
+The full symptom → cause → check → fix matrix — the native-Redis port conflict, GNU Make 3.81,
+graceful-shutdown, and architecture traps — is [docs/RUNBOOK.md §7](docs/RUNBOOK.md#7-troubleshooting).
 
 ---
 
@@ -204,5 +216,5 @@ The ones you'd actually change:
 | [docs/RUNBOOK.md](docs/RUNBOOK.md) | Operating it: every command, every scenario, reading the logs. |
 | [docs/DECISIONS.md](docs/DECISIONS.md) | ADRs — the contested calls and what was traded away. |
 | [docs/CHAOS-REPORT.md](docs/CHAOS-REPORT.md) | Measured results. Generated, not written. |
-| [docs/LEARNING.md](docs/LEARNING.md) | The concepts, explained: token buckets, timeouts, breakers, chaos. |
+| [docs/LEARNING.md](docs/LEARNING.md) | The concepts, explained: token buckets, timeouts, breakers, chaos — plus the glossary. |
 | [CLAUDE.md](CLAUDE.md) | Context for AI agents working in this repo. |

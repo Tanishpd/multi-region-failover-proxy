@@ -83,9 +83,9 @@ the application could silently connect to the developer's own Redis and a test c
 
 **Decision.** Publish `127.0.0.1:6380:6379`. In-network addressing stays `redis://redis:6379/0`.
 `MRFP_REDIS_URL` deliberately has **no default**, so an unset variable raises at boot instead of
-falling back to something plausible. Tests use db 15 and refuse to run unless the db index is 15 *and*
-a sentinel key written by our own container is present. `FLUSHALL` appears nowhere in the repository.
-Pin `redis:7.2-alpine` to match the host version, so `redis-cli` experiments share Lua and `TIME`
+falling back to something plausible. The test-database safety rails (db 15, sentinel key, no
+`FLUSHALL`) are frozen in [CONTRACT §10](CONTRACT.md#10-test-database-and-safety-rails). Pin
+`redis:7.2-alpine` to match the host version, so `redis-cli` experiments share Lua and `TIME`
 semantics with the container.
 
 **Consequence.** Every host-side command needs `-p 6380`, which is a small ongoing tax in exchange for
@@ -108,7 +108,7 @@ not being able to destroy the user's data.
    `Retry-After`.
 
 The brief asks specifically for a token bucket, and the naive Python implementation (`GET`, compute,
-`SET`) has a lost-update race that the chaos flood hits on essentially every burst.
+`SET`) has a lost-update race that any concurrent burst can hit.
 
 **Decision.** A Lua script executed via `EVALSHA`, performing refill, decision, debit, and TTL refresh
 atomically in one round trip. Written for N layers but configured with exactly one.
@@ -178,7 +178,7 @@ Document what changes at N workers rather than building for it.
 
 **Consequence.** ~200 lines and eight tests not written, for a problem this deployment does not have.
 It also removes an awkward property: a Redis-backed breaker makes Redis a dependency of the
-resilience path, in a project whose whole point is not having a single point of failure.
+resilience path.
 
 ---
 
@@ -223,16 +223,15 @@ recorded here and in the README so it reads as a choice rather than an oversight
 
 **Context.** A pre-provisioned Grafana dashboard is a strong demo artifact. It also means ~600 MB of
 additional images on a machine with 5.5 GB free, provisioning YAML and dashboard JSON that drift from
-the metric names, and arm64 manifest risk. The specified scrape config also had a latent defect —
-`scrape_interval: 1s` against the default `scrape_timeout: 10s` is rejected outright by Prometheus, so
-the profile would have been dead on first use.
+the metric names, and arm64 manifest risk.
 
 **Decision.** Keep `/metrics` — the chaos assertions read it. Cut the Prometheus and Grafana
 containers. The chaos harness's own ASCII timeline is the visual artifact, and it has the advantage of
 pasting directly into markdown and surviving in a terminal transcript.
 
-**Consequence.** No graphs. The timeline table turns out to communicate the failover moment better
-than a dashboard screenshot anyway, because it's reproducible.
+**Consequence.** No graphs. A timeline table should communicate the failover moment at least as
+well as a dashboard screenshot — and unlike a screenshot, it is reproducible and pastes into
+markdown.
 
 ---
 
@@ -242,10 +241,14 @@ than a dashboard screenshot anyway, because it's reproducible.
 
 **Date:** 2026-07-27 · **Status:** accepted
 
-**Context.** Two Docker behaviours quietly sabotage a chaos experiment.
+**Context.** Two Docker behaviours can quietly sabotage a chaos experiment.
 
-A `restart:` policy resurrects a container the harness just stopped, invalidating the timeline
-mid-measurement. And uvicorn's default graceful shutdown waits for in-flight connections to close —
+A `restart: on-failure` or `always` policy resurrects a region that *crashes* mid-run, and `always`
+additionally revives stopped containers when the daemon restarts — either invalidates the timeline
+mid-measurement. (A policy does **not** fire after a manual `docker stop`: the daemon marks the
+container manually stopped, so the chaos stop itself is safe under any policy. `restart: "no"`
+removes the crash and daemon-restart paths and documents the intent.) And uvicorn's default
+graceful shutdown waits for in-flight connections to close —
 including the proxy's *warm keep-alive sockets*. The result is that `docker stop` blocks for the full
 grace period while the region continues serving 200s. The demo shows no failover and the router looks
 broken.
@@ -266,18 +269,17 @@ what we want for a measured recovery phase.
 
 **Date:** 2026-07-27 · **Status:** accepted
 
-**Context.** The brief specifies a 200 ms timeout and specifies `docker stop` as the fault injection.
-Those two things do not meet. `docker stop` causes Docker's embedded DNS resolver to withdraw the
-container's record, so the client fails with `ConnectError` in about 2 ms — the read timeout is never
-reached. Shipping only the brief's scenario would mean the headline timeout is completely untested.
+**Context.** The brief specifies a 200 ms timeout and `docker stop` as the fault injection — and
+those two never meet: `docker stop` fails via DNS withdrawal in ~2 ms, before the read timeout can
+fire ([LEARNING §3](LEARNING.md#3-failure-modes-are-not-interchangeable)). Shipping only the brief's
+scenario would leave the headline timeout untested.
 
-**Decision.** Add `pause-us-east` as a first-class scenario. `docker pause` freezes the process
-without closing sockets; the kernel still completes the handshake from the listen backlog, so connect
-succeeds and the read hangs until the 200 ms timeout fires. Add a `blackhole` chaos mode on the region
-itself for the same effect without needing the Docker CLI.
+**Decision.** Add `pause-us-east` as a first-class scenario — `docker pause` produces a genuine
+`ReadTimeout` at the 200 ms mark. Add a `blackhole` chaos mode on the region itself for the same
+effect without needing the Docker CLI.
 
-**Consequence.** Two scenarios instead of one, and the most interesting single output in the project:
-the same code path producing a ~2 ms failure and a ~200 ms failure depending on how the region died.
+**Consequence.** Two scenarios instead of one: the same code path producing a ~2 ms failure and a
+~200 ms failure depending on how the region died.
 
 ---
 
@@ -310,15 +312,17 @@ in a response header rather than silent.
 
 **Date:** 2026-07-27 · **Status:** accepted
 
-**Context.** The instinct is to persist. It's wrong here in three separate ways.
+**Context.** The instinct is to persist. It's wrong here in three separate ways: every key already
+has a TTL, so nothing has a lifetime worth preserving; both consumers fail open, so losing state
+degrades gracefully; and the `proxy-restart` chaos drill wants a fast restart with a
+guaranteed-empty script cache, because that is what exercises the `NOSCRIPT` recovery path — AOF
+would slow the restart and defeat the drill.
 
 **Decision.** `--save "" --appendonly no --maxmemory 256mb --maxmemory-policy volatile-ttl`, and no
 named volume.
 
-**Consequence.** Every key already has a TTL, so nothing has a lifetime worth preserving. Both
-consumers fail open, so losing state degrades gracefully by design. And the `proxy-restart` chaos
-drill specifically wants a fast restart with a guaranteed-empty script cache, because that's what
-exercises the `NOSCRIPT` recovery path. AOF would slow the restart and defeat the drill.
+**Consequence.** All rate-limit state is lost on any Redis restart; both consumers tolerate that by
+design.
 
 ---
 

@@ -71,8 +71,11 @@ decide, debit, set the TTL — one round trip, atomic by construction. That's th
 `.lua` file.
 
 Two Lua-specific traps worth knowing: Lua→Redis conversion **truncates floats**, so return integers
-(this code returns tokens × 1000). And Lua 5.1's `tostring` formats with `%.14g`, so a 13-digit
-millisecond timestamp becomes `1.7532e+12` — use `string.format('%.0f', ms)`.
+(this code returns tokens × 1000). And Lua 5.1's `tostring` formats with `%.14g`, which mangles any
+value of ≥15 significant digits — a *microsecond* epoch becomes `1.7532345678901e+15`, and a
+millisecond epoch carrying a fraction becomes `1753234567890.1`. A bare 13-digit ms epoch survives
+`%.14g` intact, but values derived from `TIME` arithmetic don't reliably stay bare — write
+timestamps with `string.format('%.0f', ms)`.
 
 ---
 
@@ -95,11 +98,9 @@ That's why this project has a **separate total budget** (900 ms across all attem
 `asyncio.timeout`. Two mechanisms, two jobs: httpx bounds each attempt's idleness, the budget bounds
 the whole request.
 
-A subtlety worth internalising: those two must **not** be set to the same value. If the httpx read
-timeout and the asyncio ceiling are both 200 ms, they race, and which one fires is effectively random
-— so the recorded reason for the failure alternates between runs and tests flake. Setting the outer
-ceiling ~15 % higher makes httpx reliably win, which is what you want, because httpx knows *why* it
-failed while `asyncio.timeout` only knows *that* it did.
+One subtlety: the two must **not** be set to the same value, or they race and the recorded failure
+reason flips between runs. The arithmetic and the fix live in
+[ARCHITECTURE §3](ARCHITECTURE.md#3-the-failover-loop).
 
 **The general rule:** a proxy's total timeout must be shorter than its caller's. If your client gives
 up at 1 s and you're starting a third attempt at 900 ms, that work is discarded and every backend paid
@@ -109,9 +110,8 @@ for it anyway.
 
 ## 3. Failure modes are not interchangeable
 
-The single most useful thing this project teaches: "the region went down" describes at least four
-different physical events, and they produce different exceptions, different latencies, and different
-correct responses.
+"The region went down" describes at least four different physical events, and they produce
+different exceptions, different latencies, and different correct responses.
 
 | What you do | What the client sees | How long it takes |
 |---|---|---|
@@ -119,21 +119,22 @@ correct responses.
 | `docker stop`, with a warm connection pool | `RemoteProtocolError` — no DNS lookup happens, you write into a socket whose peer is gone | ~2 ms |
 | `docker kill` | `ReadError` / `RemoteProtocolError` — RST on pooled sockets | ~2 ms |
 | `docker pause` | `ReadTimeout` — the kernel still ACKs the SYN from the listen backlog, so connect *succeeds*, then silence | **200 ms** |
-| `docker network disconnect` | `ConnectTimeout` — the SYN goes unanswered | 100 ms |
+| `docker network disconnect` | `ConnectError` — the endpoint's DNS record goes with it | ~2 ms |
 
 **The punchline for this brief:** it asks for a 200 ms timeout *and* specifies `docker stop` as the
 fault injection. Those two never meet. `docker stop` fails via DNS in ~2 ms — the read timeout is
 never reached. If you only ever test with `docker stop`, your headline timeout is completely
 unexercised and you'd never know.
 
-Hence `make chaos-pause-us-east`. Same code path, same `except` clause, ~100× the latency, a different
-exception class. Running both and comparing is the most instructive thing you can do with this
-repository.
+Hence `make chaos-pause-us-east`: same code path, same `except` clause, ~100× the latency, a
+different exception class.
 
 Two more things worth knowing:
 
 - `httpx.ConnectTimeout` is **not** a subclass of `ConnectError`, despite the names. Catching only
-  `ConnectError` silently misses network partitions.
+  `ConnectError` silently misses every timeout class. (A true unanswered-SYN `ConnectTimeout` needs
+  DNS to keep resolving while packets drop — a firewall, not Docker, which withdraws the DNS record
+  along with the network endpoint. Partitions inside Docker fail like `stop`.)
 - A **warm connection pool changes the exception**. The first request to a dead container fails at
   DNS; a request reusing an established keep-alive socket never does a lookup and gets a protocol
   error instead. This is why catching only `TimeoutException` misses the most common real case.
@@ -198,7 +199,7 @@ The fault you choose determines the code path you test:
 | `docker stop` | Name resolution failure, fast-fail path |
 | `docker kill` | Abrupt connection reset, warm-pool path |
 | `docker pause` | Read timeout path — the *only* one that exercises a timeout |
-| `network disconnect` | Connect timeout, partition path |
+| `network disconnect` | DNS withdrawal — fails like `stop`, not like a real partition |
 | App-level 5xx injection | Response-level failure, not transport |
 | Stopping the dependency (Redis) | Fail-open/fail-closed policy |
 
@@ -261,8 +262,33 @@ The fastest way to understand any of the above is to make it fail.
    watch the recorded failure code flip between `read_timeout` and `attempt_deadline`.
 6. **Replace the Lua script with `GET`/`SET` in Python.** Run `rate-limit-storm` and count how many
    requests get through above capacity.
-7. **Add `restart: unless-stopped` to a region.** Watch the chaos timeline become incoherent as the
-   container resurrects mid-measurement.
+7. **Add `restart: on-failure` to a region, then crash it from inside** —
+   `docker exec us-east-1-endpoint kill 1` — instead of `docker stop`. The region resurrects
+   mid-measurement and the timeline becomes incoherent. Then try plain `docker stop` and note the
+   policy does *not* fire: Docker ignores restart policies after a manual stop.
 8. **Switch to `MRFP_MODE=resilient`** and compare p50 during the outage against literal mode. That
    difference is exactly what the circuit breaker buys — and the drop in `upstream_failover` log lines
    is exactly what it costs you in brief fidelity.
+
+---
+
+## 9. Glossary
+
+The terms of art these docs lean on, one line each.
+
+| Term | Meaning |
+|---|---|
+| **literal / resilient mode** | `MRFP_MODE`: breaker off (every request walks the priority list — the graded configuration) vs breaker on. |
+| **open-loop pacer** | Load generator that issues requests on a fixed schedule regardless of responses; the antidote to coordinated omission. |
+| **coordinated omission** | Measurement error where a blocked load generator stops sending, deleting the latency spike it was meant to record. |
+| **NOT_SENT / MAYBE_SENT** | Failure classes: no bytes reached the region (replay free) vs bytes may have arrived (replay only because inference is deterministic). |
+| **lazy refill** | Converting elapsed time into tokens at read time instead of running a background refill job. |
+| **gap timer** | What an httpx `read` timeout actually is: a bound on the silence *between* bytes, not on the whole response. |
+| **total budget** | The 900 ms wall-clock ceiling across all failover attempts, enforced separately from per-attempt timeouts. |
+| **hash tag** | The `{…}` span of a Redis key, which alone determines the cluster slot — what makes multi-key Lua legal under Cluster. |
+| **rightmost-untrusted walk** | XFF parsing rule: scan `chain + [peer]` right-to-left, return the first entry that is not a trusted proxy; fall back to the peer, never `chain[0]`. |
+| **fail open / fail closed** | Posture when a dependency dies: serve without it vs refuse everything. |
+| **half-open probe** | The single in-flight request a recovering breaker admits to test the region — single-flight, or recovery becomes a stampede. |
+| **admission semaphore** | The cap on concurrent in-flight requests; with buffered bodies, unbounded concurrency is unbounded memory. |
+| **AUTOGEN block** | A marked region of CHAOS-REPORT.md that only `chaos/report.py` may write — the mechanism behind "no hand-written measurements". |
+| **brief fidelity** | The property that each of the four brief requirements stays visibly, provably exercised — guarded by assertion A13. |
