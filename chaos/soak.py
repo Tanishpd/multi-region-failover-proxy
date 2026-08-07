@@ -212,8 +212,10 @@ def report(tenants: list[TenantStats], noisy: TenantStats, args: argparse.Namesp
     failures = [f for t in [*tenants, noisy] for f in t.failures if f[1] >= 500]
     if failures:
         by_tokens = Counter(mt for mt, _ in failures)
-        print("\n5xx by requested max_tokens: " + ", ".join(
-            f"{mt}:{n}" for mt, n in sorted(by_tokens.items())))
+        print(
+            "\n5xx by requested max_tokens: "
+            + ", ".join(f"{mt}:{n}" for mt, n in sorted(by_tokens.items()))
+        )
 
     streamed_ok = sum(t.stream_ok for t in tenants)
     streamed_bad = sum(t.stream_bad for t in tenants)
@@ -262,9 +264,7 @@ def report(tenants: list[TenantStats], noisy: TenantStats, args: argparse.Namesp
         worst = max(well_behaved, key=lambda t: t.server_errors)
         share = worst.server_errors / (fleet_total - fleet_ok)
         if share > 0.6 and worst.server_errors > 2:
-            fails.append(
-                f"{worst.name} absorbed {share:.0%} of all failures — not a fair share"
-            )
+            fails.append(f"{worst.name} absorbed {share:.0%} of all failures — not a fair share")
 
     # The noisy neighbour must actually have been throttled, or the isolation
     # above was never tested — everyone passing because nobody hit a limit

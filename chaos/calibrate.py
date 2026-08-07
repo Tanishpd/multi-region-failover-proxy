@@ -324,8 +324,7 @@ def check(derived: dict, configured: dict) -> list[str]:
 async def run(args: argparse.Namespace) -> int:
     async with httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=5.0)) as client:
         discovered = [
-            (await probe_metadata(client, region, port), port)
-            for region, port in REGIONS.items()
+            (await probe_metadata(client, region, port), port) for region, port in REGIONS.items()
         ]
 
         requests, tokens = plan(args.samples)

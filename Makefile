@@ -84,8 +84,14 @@ test-unit: venv
 test: venv
 	@$(PYTEST) -q
 
+# BOTH checks, because CI runs both. `make lint` ran only `ruff check` while
+# .github/workflows/ci.yml also ran `ruff format --check`, so local was green
+# and CI was red for five consecutive pushes before anyone looked. A local gate
+# that is weaker than the remote one is worse than no local gate: it actively
+# certifies broken pushes.
 lint: venv
 	@$(RUFF) check .
+	@$(RUFF) format --check .
 
 fmt: venv
 	@$(RUFF) format .

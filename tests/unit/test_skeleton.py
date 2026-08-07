@@ -185,3 +185,35 @@ def test_help_does_not_advertise_targets_that_do_not_exist() -> None:
         if a not in targets and not (a.startswith("chaos-") and "chaos-%:" in makefile)
     )
     assert not phantom, f"`make help` advertises non-existent targets: {phantom}"
+
+
+def test_make_lint_runs_everything_ci_runs() -> None:
+    """A local gate weaker than the remote one certifies broken pushes.
+
+    `make lint` ran only `ruff check` while CI also ran `ruff format --check`.
+    Five consecutive pushes went out green locally and red on CI, and nobody
+    looked — the failures were invisible from the machine doing the pushing.
+
+    Same shape as every reachability bug in this repo: two surfaces describing
+    one thing, and only one of them tested.
+    """
+    import re
+
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    makefile = (ROOT / "Makefile").read_text()
+
+    lint_recipe = makefile[makefile.index("\nlint:") :]
+    lint_recipe = lint_recipe[: lint_recipe.index("\n\n")]
+
+    # Every `ruff <subcommand> <flags>` CI runs must appear in `make lint`.
+    ci_ruff = {m.group(1).strip() for m in re.finditer(r"run: ruff (.+)", ci)}
+    missing = sorted(
+        cmd for cmd in ci_ruff if cmd.split()[0] not in lint_recipe or not _covers(lint_recipe, cmd)
+    )
+    assert not missing, f"`make lint` does not run what CI runs: {missing}"
+
+
+def _covers(recipe: str, ci_cmd: str) -> bool:
+    """True when the recipe invokes ruff with the same subcommand and flags."""
+    want = [t for t in ci_cmd.split() if t != "."]
+    return any(all(tok in line for tok in want) for line in recipe.splitlines() if "RUFF" in line)
