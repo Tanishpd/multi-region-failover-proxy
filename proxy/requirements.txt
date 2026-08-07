@@ -1,5 +1,9 @@
-fastapi==0.115.8
-starlette==0.45.3
+# NO fastapi. The proxy is a pure Starlette app — it never imported fastapi,
+# and fastapi's `starlette<0.46` pin was what held starlette at 0.45.3, which
+# carries CVE-2025-62727 (DoS via Range header merging, fixed in 0.49.1). The
+# CI vulnerability gate caught it. Dropping an unused dependency fixed a real
+# CVE and made the image smaller.
+starlette==1.4.1
 uvicorn[standard]==0.34.0
 httpx==0.28.1
 pydantic==2.10.6
