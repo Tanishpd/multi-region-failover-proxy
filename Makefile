@@ -34,7 +34,7 @@ RUFF    := $(VENV)/bin/ruff
 .PHONY: help doctor venv build up up-regions down ps health logs \
         test-unit test lint fmt docs-check chaos report bench reset clean \
         prod-config prod-up prod-down capacity calibrate calibrate-check \
-        redis-ha-up redis-ha-down redis-ha-drill redis-ha-e2e soak
+        redis-ha-up redis-ha-down redis-ha-drill redis-ha-e2e soak prod-cred-drill
 
 # --- meta -------------------------------------------------------------------
 
@@ -170,3 +170,8 @@ prod-up:
 
 prod-down:
 	@bash ops/scripts/prod.sh down
+
+# Rotate the Redis credential under a running production fleet: the operational
+# failure most likely to actually happen. Brings prod up and down itself.
+prod-cred-drill:
+	@bash ops/scripts/cred-rotation-drill.sh

@@ -146,6 +146,12 @@ session.
   proxy from a run whose A11 is high — and do not blame whatever else happens to be running without
   testing it, which is how a wrong co-tenancy claim got into these docs once already.
 
+- **`grep -q` in a `pipefail` pipeline reports failure on a MATCH.** `grep -q` exits at the first
+  hit, the upstream command takes SIGPIPE, and `set -o pipefail` surfaces that as the pipeline's
+  status — so `docker logs ... | grep -q X || fail` fires `fail` even though X was found. It only
+  bites when the upstream output is large enough to still be writing. Use `grep -c` and compare the
+  count. This produced two false failures in `make prod-cred-drill` while the system was behaving
+  perfectly.
 - `make` here is **GNU Make 3.81** (macOS system make). `.SHELLFLAGS` arrived in 3.82 and is
   **silently ignored** — a failing pipeline exits 0 and `make chaos` reports success on a failed run.
   Keep one command per recipe, delegating to `ops/scripts/*.sh` that carry their own

@@ -49,6 +49,7 @@ printf '%s\n' \
 "  make prod-config  render deploy/compose.prod.yml and validate it" \
 "  make prod-up      bring up the production topology (standalone, not an override)" \
 "  make prod-down" \
+"  make prod-cred-drill   rotate the Redis credential under a live prod fleet" \
 "" \
 "${B}housekeeping${O}" \
 "  make venv         create/refresh the host virtualenv" \

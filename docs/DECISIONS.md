@@ -901,6 +901,22 @@ fix is a redeploy rather than a config edit — which is what the runbook says.
 wrong password refuses to boot, correct password verifies `ok`, and an unreachable Redis still boots
 and degrades. Two alerts added, both with runbook sections.
 
+**Then drilled end to end** (`make prod-cred-drill`), because everything above was still a set of
+assertions about a machine nobody had rotated a secret on. Against the real production profile —
+three replicas, authenticated Redis — rotating `requirepass` under live traffic gives:
+
+| check | result |
+|---|---|
+| traffic during the rotation | 6/6 served — fail-open held |
+| `rate_limit_backend_up` | 1.0 → **0.0** (so `MRFPRateLimitDegraded` fires) |
+| `rate_limit_degraded` | 5 lines, `reason="auth"`, at **ERROR** (so `MRFPRateLimitRefused` fires) |
+| a replica restarted on the stale secret | **refuses to boot**, crash-loops with the remediation text |
+| credential restored | limiter reattaches with **no restart**; the crash-looped replica recovers itself |
+
+Every operational claim in [RUNBOOK](RUNBOOK.md#alert-mrfpratelimitrefused) — including "a fresh
+deploy cannot reach this state" and "the fix is a redeploy, not a config edit" — is now measured
+rather than asserted.
+
 The general lesson is the one worth keeping: **fail-open must be scoped to the failures it was
 argued for.** [ADR-013](#adr-013) reasoned about an outage and then silently covered
 misconfiguration too, because both arrive as the same base class. Every fail-open path deserves the
