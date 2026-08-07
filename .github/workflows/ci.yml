@@ -95,24 +95,25 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - id: build
+      # BUILD -> SCAN -> PUSH, in that order.
+      #
+      # The first version of this job pushed and then scanned, which publishes
+      # a vulnerable image and reports it afterwards — the gate has to come
+      # first or it is not a gate. It also meant trivy had to pull from ghcr
+      # and had no credentials to do so.
+      - name: build (local, not pushed)
         uses: docker/build-push-action@v6
         with:
           context: ./proxy
-          # Immutable tag. `:dev` is not a deployable artifact — you cannot roll
-          # back to a tag that moves.
           tags: ${{ steps.img.outputs.name }}:${{ github.sha }}
-          push: ${{ github.event_name == 'push' }}
-          # SBOM and provenance travel WITH the image digest, rather than as a
-          # build artifact nobody can associate with a running container.
-          sbom: true
-          provenance: mode=max
+          load: true
+
       - name: vulnerability gate
-        # The scanner runs as a PINNED CONTAINER rather than a marketplace
-        # action. Two reasons: the action version is one more unverifiable
-        # dependency in a job whose whole purpose is supply-chain assurance
-        # (and the first version I pinned did not exist, which failed the job),
-        # and a container tag is something you can pull and check.
+        # Runs as a PINNED CONTAINER rather than a marketplace action: in a job
+        # whose whole purpose is supply-chain assurance, an unverifiable action
+        # version is a poor dependency — and the version I first guessed at did
+        # not exist. Scans the locally loaded image, so no registry auth is
+        # needed and nothing has been published yet.
         run: |
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
@@ -122,3 +123,17 @@ jobs:
               --exit-code 1 \
               --format table \
               ${{ steps.img.outputs.name }}:${{ github.sha }}
+
+      - name: push (only after the gate passes)
+        if: github.event_name == 'push'
+        uses: docker/build-push-action@v6
+        with:
+          context: ./proxy
+          tags: ${{ steps.img.outputs.name }}:${{ github.sha }}
+          push: true
+          # SBOM and provenance travel WITH the image digest, rather than as a
+          # build artifact nobody can associate with a running container. They
+          # are produced at push time, which is why this is a second step
+          # rather than a flag on the build above.
+          sbom: true
+          provenance: mode=max
