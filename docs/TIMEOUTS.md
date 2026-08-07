@@ -47,6 +47,23 @@ MRFP_UPSTREAM_MODEL=qwen2.5:0.5b \
   docker compose up -d && make calibrate
 ```
 
+**Against a paid or shared endpoint it will refuse until you confirm.** A default
+sweep is **252 requests and ~43,000 generated tokens** — trivial in money against
+most models, but it lands on someone else's rate limit, and it used to happen
+silently. When any region reports it is proxying to a live model, the tool
+prints the plan and exits 2:
+
+```
+plan: 252 requests, ~42,840 generated tokens across 3 regions at --samples 20
+
+REFUSING: the regions are proxying to a live model (qwen2.5:0.5b).
+This would send 252 real requests and generate ~42,840 tokens.
+Re-run with --yes to confirm, or lower --samples first.
+```
+
+Lower `--samples` first against anything slow or expensive; note that with *n*
+samples the reported p99 is simply the observed maximum.
+
 **Three caveats that bound how far these numbers travel.**
 
 1. **A small model on a laptop is not your production fleet.** Re-run this
@@ -107,9 +124,9 @@ calibrate-check` fails if it ever stops being true.
 <!-- AUTOGEN:BEGIN:calibration-env -->
 | what was measured | value |
 |---|---|
-| backend | `upstream` |
-| model(s) | `qwen2.5:0.5b` |
-| samples per step | 10 |
+| backend | `mock` |
+| model(s) | `mock-echo-1` |
+| samples per step | 20 |
 | token steps | 8, 32, 128, 512 |
 
 <!-- AUTOGEN:END -->
@@ -119,9 +136,9 @@ calibrate-check` fails if it ever stops being true.
 <!-- AUTOGEN:BEGIN:calibration-table -->
 | region | TTFT | ms/token | p99 @ 8 | p99 @ 32 | p99 @ 128 | p99 @ 512 |
 |---|---|---|---|---|---|---|
-| us-east-1 | 534.2 ms | 0.759 | 218.5 ms | 501.4 ms | 1602.2 ms | 3936.0 ms |
-| eu-west-1 | 457.3 ms | 1.036 | 381.4 ms | 567.1 ms | 1504.7 ms | 1627.0 ms |
-| ap-southeast-1 | 461.6 ms | 2.224 | 236.9 ms | 555.9 ms | 1942.4 ms | 3964.2 ms |
+| us-east-1 | 23.6 ms | 0.257 | 30.4 ms | 36.4 ms | 62.1 ms | 170.4 ms |
+| eu-west-1 | 72.9 ms | 0.248 | 81.5 ms | 89.2 ms | 115.8 ms | 208.2 ms |
+| ap-southeast-1 | 165.9 ms | 0.261 | 179.7 ms | 186.1 ms | 212.2 ms | 312.0 ms |
 <!-- AUTOGEN:END -->
 
 ### Capability ceiling at the shipped read timeout
@@ -131,21 +148,21 @@ At `read_timeout_ms=200`, against an API that accepts up to `max_tokens=512`:
 
 | region | largest serviceable request | verdict |
 |---|---|---|
-| us-east-1 | 0 | **503s above 0 tokens** |
-| eu-west-1 | 0 | **503s above 0 tokens** |
-| ap-southeast-1 | 0 | **503s above 0 tokens** |
+| us-east-1 | 512 | serves the full range |
+| eu-west-1 | 511 | **503s above 511 tokens** |
+| ap-southeast-1 | 130 | **503s above 130 tokens** |
 <!-- AUTOGEN:END -->
 
 ### Derived settings
 
 <!-- AUTOGEN:BEGIN:calibration-derived -->
-Worst p99 across all regions and token counts: **3964.2 ms**. Streaming inter-chunk gap p99: **22.23 ms** over 309 chunks.
+Worst p99 across all regions and token counts: **312.03 ms**. Streaming inter-chunk gap p99: **13.82 ms** over 384 chunks.
 
 At 2.0x headroom:
 
 ```
-MRFP_READ_TIMEOUT_MS              = 7929
-MRFP_TOTAL_BUDGET_MS              = 16058
+MRFP_READ_TIMEOUT_MS              = 625
+MRFP_TOTAL_BUDGET_MS              = 1450
 MRFP_STREAM_INTER_CHUNK_TIMEOUT_S = 1.0
 ```
 <!-- AUTOGEN:END -->

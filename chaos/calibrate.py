@@ -132,18 +132,39 @@ class RegionProfile:
         return max((s.p99 for s in self.steps), default=0.0)
 
 
-async def probe_region(
-    client: httpx.AsyncClient, region: str, port: int, samples: int
-) -> RegionProfile:
-    base = f"http://127.0.0.1:{port}"
-
-    meta = (await client.get(f"{base}/")).json()
-    profile = RegionProfile(
+async def probe_metadata(client: httpx.AsyncClient, region: str, port: int) -> RegionProfile:
+    """One cheap GET. Separated from the sweep so the plan can be shown, and
+    refused, BEFORE any generation is paid for."""
+    meta = (await client.get(f"http://127.0.0.1:{port}/")).json()
+    return RegionProfile(
         region=region,
         backend=meta.get("backend", "unknown"),
         model=meta.get("model", "unknown"),
         steps=[],
     )
+
+
+def live_models(profiles: list[RegionProfile]) -> list[str]:
+    """Models that will really be billed/rate-limited by a sweep.
+
+    The tool talks to localhost and cannot see the endpoint behind a region —
+    but the region reports whether it is proxying to one, which answers the
+    same question.
+    """
+    return sorted({p.model for p in profiles if p.backend == "upstream"})
+
+
+def plan(samples: int) -> tuple[int, int]:
+    """(requests, generated tokens) the sweep will cost. +1 per step is warm-up."""
+    per_region = len(TOKEN_STEPS) * (samples + 1)
+    tokens = sum(t * (samples + 1) for t in TOKEN_STEPS)
+    return per_region * len(REGIONS), tokens * len(REGIONS)
+
+
+async def probe_region(
+    client: httpx.AsyncClient, profile: RegionProfile, port: int, samples: int
+) -> RegionProfile:
+    base = f"http://127.0.0.1:{port}"
 
     for tokens in TOKEN_STEPS:
         step = Step(max_tokens=tokens)
@@ -282,10 +303,34 @@ def check(derived: dict, configured: dict) -> list[str]:
 
 async def run(args: argparse.Namespace) -> int:
     async with httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=5.0)) as client:
+        discovered = [
+            (await probe_metadata(client, region, port), port)
+            for region, port in REGIONS.items()
+        ]
+
+        requests, tokens = plan(args.samples)
+        live = live_models([p for p, _ in discovered])
+        print(
+            f"\nplan: {requests} requests, ~{tokens:,} generated tokens "
+            f"across {len(REGIONS)} regions at --samples {args.samples}"
+        )
+
+        # A real endpoint behind the regions means real money and, more to the
+        # point, 252 requests against someone else's rate limit. The tool cannot
+        # see the endpoint — it talks to localhost — but the regions report
+        # whether they are proxying to one, which is the same question.
+        if live and not args.yes:
+            print(
+                f"\nREFUSING: the regions are proxying to a live model ({', '.join(live)}).\n"
+                f"This would send {requests} real requests and generate ~{tokens:,} tokens.\n"
+                "Re-run with --yes to confirm, or lower --samples first."
+            )
+            return 2
+
         profiles = []
-        for region, port in REGIONS.items():
-            print(f"  probing {region} on :{port} ...", flush=True)
-            profiles.append(await probe_region(client, region, port, args.samples))
+        for profile, port in discovered:
+            print(f"  probing {profile.region} on :{port} ...", flush=True)
+            profiles.append(await probe_region(client, profile, port, args.samples))
 
     derived = derive(profiles, args.attempts, args.connect_ms)
 
@@ -515,6 +560,11 @@ def write_doc(report: dict) -> Path:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--samples", type=int, default=20, help="requests per token step")
+    ap.add_argument(
+        "--yes",
+        action="store_true",
+        help="confirm spending real requests when a region proxies to a live model",
+    )
     ap.add_argument("--attempts", type=int, default=2, help="regions the prod profile attempts")
     ap.add_argument("--connect-ms", type=int, default=100)
     ap.add_argument("--check", action="store_true", help="exit non-zero if config is unsupported")

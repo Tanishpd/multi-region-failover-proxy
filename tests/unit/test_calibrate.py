@@ -17,10 +17,13 @@ sys.path.insert(0, str(ROOT))
 
 from chaos.calibrate import (  # noqa: E402
     HEADROOM,
+    TOKEN_STEPS,
     RegionProfile,
     Step,
     check,
     derive,
+    live_models,
+    plan,
     serviceable_tokens,
 )
 
@@ -148,3 +151,34 @@ def test_stream_samples_are_counted_when_present() -> None:
     derived = derive([prof], attempts=2, connect_ms=100)
     assert derived["stream_samples"] == 40
     assert derived["measured_stream_gap_p99_ms"] == 5.0
+
+
+# --- do not spend someone else's money by accident --------------------------
+
+
+def test_the_plan_counts_warmups() -> None:
+    """One warm-up per step is discarded but still generated, still billed."""
+    requests, tokens = plan(samples=10)
+    assert requests == 3 * len(TOKEN_STEPS) * 11
+    assert tokens == 3 * sum(t * 11 for t in TOKEN_STEPS)
+
+
+def test_a_mock_backend_needs_no_confirmation() -> None:
+    """The demo path must stay a single command with no prompt."""
+    mock = RegionProfile(region="r", backend="mock", model="mock-echo-1", steps=[])
+    assert live_models([mock]) == []
+
+
+def test_a_live_backend_is_named_so_the_refusal_can_say_which() -> None:
+    """A default run is 252 requests and ~43k generated tokens. Small in money,
+    but it lands on someone else's rate limit, and it happened silently."""
+    live = RegionProfile(region="r", backend="upstream", model="gpt-4o-mini", steps=[])
+    mock = RegionProfile(region="q", backend="mock", model="mock-echo-1", steps=[])
+    assert live_models([live, mock]) == ["gpt-4o-mini"]
+
+
+def test_the_refusal_is_wired_and_exits_nonzero() -> None:
+    body = (ROOT / "chaos" / "calibrate.py").read_text()
+    assert "REFUSING" in body
+    assert "if live and not args.yes:" in body
+    assert "return 2" in body
