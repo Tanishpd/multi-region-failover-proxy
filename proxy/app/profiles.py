@@ -66,6 +66,7 @@ _PRESETS: dict[str, dict[str, Any]] = {
         "log_sample_rate": 0.01,
         "log_client_ip": "hashed",
         "graceful_shutdown_s": 30,
+        "streaming_enabled": True,
     },
 }
 

@@ -6,6 +6,9 @@ Exactly three modes (docs/CONTRACT.md section 3):
   error      return 503 — a response-level failure, not a transport one
   blackhole  accept the connection and never respond — the only way to get a
              genuine ReadTimeout without `docker pause`
+  truncate   begin a stream, emit some frames, then die mid-body — the only way
+             to exercise a POST-COMMIT failure, where failover is structurally
+             impossible and the proxy must signal truncation instead
 
 `docker stop` and `docker pause` cover the transport-level failures; these cover
 the ones a container-level fault cannot express.

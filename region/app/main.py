@@ -8,11 +8,13 @@ section 3 owns the wire contract.
 from __future__ import annotations
 
 import asyncio
+import json
 import random
 import time
 from typing import Annotated, Literal
 
 from fastapi import FastAPI, Header, HTTPException, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app import chaos, inference
@@ -25,10 +27,11 @@ class InferRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=8192)
     max_tokens: int = Field(default=16, ge=1, le=512)
     seed: int | None = None
+    stream: bool = False
 
 
 class ChaosRequest(BaseModel):
-    mode: Literal["slow", "error", "blackhole"]
+    mode: Literal["slow", "error", "blackhole", "truncate"]
     ms: int = Field(default=0, ge=0, le=60_000)
 
 
@@ -44,13 +47,42 @@ async def _simulate_latency() -> None:
     await asyncio.sleep(delay_ms / 1000.0)
 
 
+async def _token_stream(body: InferRequest):
+    """SSE frames, one per token, with a [DONE] sentinel.
+
+    Under the `truncate` chaos mode the generator RAISES partway through rather
+    than returning, so uvicorn abandons the chunked framing without writing the
+    terminal chunk — which is what a real upstream dying mid-response looks
+    like. Returning early would send a well-formed but short body, i.e. tell the
+    client it received a complete answer.
+    """
+    text = inference.complete(body.prompt, body.max_tokens, body.seed)
+    tokens = text.split()
+    cut = max(1, len(tokens) // 3)
+
+    for index, tok in enumerate(tokens):
+        if chaos.state.mode == "truncate" and index == cut:
+            raise RuntimeError("chaos: truncating the stream mid-body")
+        yield f"data: {json.dumps({'token': tok, 'index': index})}\n\n".encode()
+        await asyncio.sleep(0.005)
+
+    yield b"data: [DONE]\n\n"
+
+
 @app.post("/v1/infer")
-async def infer(body: InferRequest, response: Response) -> dict[str, object]:
+async def infer(body: InferRequest, response: Response):
     if chaos.state.mode == "blackhole":
         await chaos.blackhole()  # never returns
 
     started = time.perf_counter()
     await _simulate_latency()
+
+    if body.stream and chaos.state.mode != "error":
+        return StreamingResponse(
+            _token_stream(body),
+            media_type="text/event-stream",
+            headers={**_region_headers(), "x-stream": "1", "x-accel-buffering": "no"},
+        )
 
     if chaos.state.mode == "error":
         raise HTTPException(

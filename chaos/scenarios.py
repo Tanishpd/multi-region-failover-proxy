@@ -253,12 +253,95 @@ async def recover_us_east(cfg: FloodConfig, docker: DockerControl) -> ScenarioRe
     )
 
 
+async def truncate_mid_stream(cfg: FloodConfig, docker: DockerControl) -> ScenarioResult:
+    """A region dies AFTER the first byte, where failover is impossible.
+
+    Every other scenario proves the proxy can route around a failure. This one
+    proves it knows when it cannot, and says so instead of pretending.
+    """
+    import httpx
+
+    from chaos.config import REGIONS
+
+    t0 = time.monotonic()
+    events: list[tuple[float, str]] = []
+    records: list[Record] = []
+
+    admin = {"X-Admin-Token": "dev-chaos", "content-type": "application/json"}
+    url = "http://127.0.0.1:9001/admin/chaos"
+    stream_url = cfg.url
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        await client.post(url, json={"mode": "truncate"}, headers=admin)
+        events.append((time.monotonic(), "us-east-1 truncating"))
+
+        for seq in range(20):
+            sent = time.monotonic()
+            body, region, saw_done, saw_error = b"", "-", False, False
+            try:
+                async with client.stream(
+                    "POST",
+                    stream_url,
+                    json={"prompt": "chaos", "max_tokens": 12, "stream": True},
+                    headers={
+                        "content-type": "application/json",
+                        "x-chaos-bypass": cfg.bypass_token,
+                    },
+                ) as resp:
+                    region = resp.headers.get("x-served-by-region", "-")
+                    async for chunk in resp.aiter_bytes():
+                        body += chunk
+            except Exception:
+                pass
+            saw_done = b"[DONE]" in body
+            saw_error = b"event: error" in body
+            records.append(
+                Record(
+                    seq=seq,
+                    request_id=f"stream-{seq}",
+                    t_send=sent,
+                    t_recv=time.monotonic(),
+                    status=200 if saw_done else 499,
+                    region=region,
+                    attempts=1,
+                    failover_path=f"done={saw_done},error={saw_error}",
+                    latency_ms=(time.monotonic() - sent) * 1000,
+                )
+            )
+
+        await client.delete(url, headers=admin)
+        events.append((time.monotonic(), "chaos cleared"))
+
+    end = time.monotonic()
+    windows = {
+        "baseline": Window("baseline", t0, t0),
+        "outage": Window("outage", t0, end),
+        "recovery": Window("recovery", end, end),
+    }
+    return ScenarioResult(
+        name="truncate-mid-stream",
+        records=records,
+        assertions=[],
+        events=events,
+        windows=windows,
+        docker_actions=docker.as_dict(),
+        t0=t0,
+        notes={
+            "fault_duration_ms": 0.0,
+            "primary": "us-east-1",
+            "failover_to": "eu-west-1",
+            "regions": list(REGIONS),
+        },
+    )
+
+
 SCENARIOS: dict[str, Callable] = {
     "stop-us-east": stop_us_east,
     "pause-us-east": pause_us_east,
     "cascade-two": cascade_two,
     "total-blackout": total_blackout,
     "recover-us-east": recover_us_east,
+    "truncate-mid-stream": truncate_mid_stream,
 }
 
 
@@ -272,6 +355,10 @@ def assert_scenario(
     notes = result.notes
     if result.name == "total-blackout":
         result.assertions = _blackout_assertions(result)
+        return
+
+    if result.name == "truncate-mid-stream":
+        result.assertions = _stream_assertions(result)
         return
 
     # Only cascade-two gets an error budget: with two regions down, the entire
@@ -292,6 +379,31 @@ def assert_scenario(
         error_budget=error_budget,
         mode=mode,
     )
+
+
+def _stream_assertions(result: ScenarioResult) -> list[Assertion]:
+    """A17/A18. Ids start at 17 because A14-A16 are taken by the blackout set."""
+    truncated = [r for r in result.records if r.status == 499]
+    signalled = [r for r in truncated if "error=True" in r.failover_path]
+    silent = [r for r in truncated if "done=True" in r.failover_path]
+    regions = {r.region for r in result.records if r.region != "-"}
+
+    return [
+        Assertion(
+            "A17",
+            "every truncated stream carried an error frame and no [DONE]",
+            bool(truncated) and len(signalled) == len(truncated) and not silent,
+            f"{len(signalled)} of {len(truncated)} truncated streams signalled; "
+            f"{len(silent)} looked complete but were not",
+        ),
+        Assertion(
+            "A18",
+            "no committed stream was served by a second region",
+            len(regions) <= 1,
+            f"regions that served a stream: {sorted(regions) or 'none'} — a committed "
+            "stream cannot fail over, because the bytes are already gone",
+        ),
+    ]
 
 
 def _blackout_assertions(result: ScenarioResult) -> list[Assertion]:

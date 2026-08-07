@@ -91,7 +91,7 @@ class KeyStore:
             if not isinstance(cfg, dict) or "sha256" not in cfg:
                 raise RuntimeError(
                     f"{self.path}: entry {tenant!r} must be an object with a 'sha256' field. "
-                    "Generate one with: python -c \"import secrets,hashlib;"
+                    'Generate one with: python -c "import secrets,hashlib;'
                     "k='mrfp_sk_'+secrets.token_urlsafe(32);print(k);"
                     'print(hashlib.sha256(k.encode()).hexdigest())"'
                 )

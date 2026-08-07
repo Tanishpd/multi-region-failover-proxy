@@ -240,6 +240,14 @@ graceful-shutdown, and architecture traps — is [docs/RUNBOOK.md §7](docs/RUNB
 
 Two profiles, and the honest answer differs by which you mean.
 
+**Streaming works, with a commit latch** ([ADR-024](docs/DECISIONS.md#adr-024)). Failover is
+invisible before the first byte reaches the client and structurally impossible after it; a
+post-commit failure is signalled twice rather than silently truncated. Measured live: a region
+killed pre-commit produced `us-east-1:connect_error(31.9ms),eu-west-1:ok(97.1ms)` and a normal
+`[DONE]` stream; the same region dying mid-body produced an `event: error` frame, **zero** `[DONE]`
+frames, and no failover. `make chaos-truncate-mid-stream` asserts it: 20 of 20 truncated streams
+signalled, 0 looked complete.
+
 **What the `prod` profile gives you.** Bounded memory enforced at boot; overload that sheds instead
 of manufacturing a fake region outage; API-key auth with per-tenant quotas; a control plane that is
 disabled unless configured; secrets absent from `docker inspect`; ~18× less middleware overhead
@@ -253,11 +261,8 @@ real Redis, a chaos scenario, and an SBOM-attested CVE-gated image build.
 first request into an outage still pays for it ([ADR-009](docs/DECISIONS.md#adr-009)). No
 cross-replica coordination: breakers and the fallback bucket are per-process, so N replicas means N
 independent detections and, during a Redis outage, N × the documented limit. Redis is a cache with
-no persistence or HA. No streaming — the dominant real use case for a model API — because
-buffer-for-replay and streaming are in direct tension and doing it properly needs a commit-latch
-state machine that has not been built. No response deduplication: a `MAYBE_SENT` request without an
-`Idempotency-Key` is refused rather than replayed. No TLS in the proxy; that terminates at the
-ingress.
+no persistence or HA. No response deduplication: a `MAYBE_SENT` request without an `Idempotency-Key` is refused rather
+than replayed. No TLS in the proxy; that terminates at the ingress.
 
 **And the regions are still mocks.** Every latency number here describes `blake2b` behind a
 `sleep`. They are honest measurements of this system and meaningless as predictions for real

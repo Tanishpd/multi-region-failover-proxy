@@ -87,12 +87,16 @@ This path is identical on the proxy and on each region. The proxy forwards the b
 Request:
 
 ```json
-{ "prompt": "hello", "max_tokens": 16, "seed": null }
+{ "prompt": "hello", "max_tokens": 16, "seed": null, "stream": false }
 ```
 
 - `prompt` — required, string, 1..8192 chars
 - `max_tokens` — optional int, default `16`, 1..512
 - `seed` — optional int or null
+- `stream` — optional bool, default `false`. When true the response is
+  `text/event-stream` (see below). Only honoured when the proxy runs with
+  `MRFP_STREAMING_ENABLED=1`; otherwise the field is ignored and a normal
+  buffered JSON response is returned.
 
 Response `200`:
 
@@ -111,6 +115,46 @@ Response `200`:
 Inference is **deterministic**: `blake2b(prompt || seed)` seeds the RNG, so all three regions return
 identical output for identical input. This is what makes replaying a POST to a second region
 defensible, and it is why the chaos harness can diff responses across a failover without noise.
+
+### Streaming responses
+
+`stream: true` returns `text/event-stream`, one SSE frame per token:
+
+```
+data: {"token":"latency","index":0}
+
+data: {"token":"budget","index":1}
+
+data: [DONE]
+```
+
+**`data: [DONE]` is the completeness sentinel**, and its absence is how a client
+knows it got a truncated answer. `X-Stream-Terminator: [DONE]` announces it, so a
+client does not have to hard-code the convention.
+
+Failover across a stream is governed by one rule, and it is the whole design:
+
+| Phase | Meaning | Failover |
+|---|---|---|
+| `preroll` | Upstream headers and the FIRST chunk have been received; nothing has been written to the client yet | **Possible.** A region that dies here is replaced invisibly — the client sees a normal response from the next region |
+| `committed` | At least one byte has reached the client | **Structurally impossible.** The bytes are gone; there is no way to un-send them |
+
+A region that dies after commit produces an `event: error` frame followed by a
+**deliberately truncated** HTTP body — the terminal chunk is never written, so an
+HTTP/1.1-correct client sees an incomplete response and an SSE client sees no
+`[DONE]`. Two independent signals, because a client that ignores unknown SSE
+event types would otherwise treat a truncated stream as a complete one.
+
+Streaming responses also carry:
+
+| Header | Meaning |
+|---|---|
+| `X-Stream` | `1` — so a dashboard does not average streaming and buffered latency together |
+| `X-Stream-Terminator` | `[DONE]` — what completeness looks like |
+| `X-Accel-Buffering` | `no` — stops an intermediary buffering the whole stream and defeating time-to-first-byte |
+
+On a streaming response `X-Total-Latency-Ms` is time-to-**commit**, not total
+duration: the total is not known when the headers are written.
 
 ### Control-plane routes (proxy)
 
@@ -134,8 +178,13 @@ defensible, and it is why the chaos harness can diff responses across a failover
 | `GET /admin/chaos` | Read the active mode. |
 | `DELETE /admin/chaos` | Clear back to healthy. |
 
-Chaos modes are exactly three: `slow` (add latency), `error` (return 503), `blackhole` (accept the
-connection and never respond). No others.
+Chaos modes are exactly four: `slow` (add latency), `error` (return 503),
+`blackhole` (accept the connection and never respond), and `truncate` (begin a
+stream, then close the connection mid-body). No others.
+
+`truncate` exists because it is the only way to exercise a post-commit failure —
+the one case where failover is structurally impossible and the proxy must signal
+truncation instead.
 
 `POST /admin/chaos` body: `{ "mode": "slow" | "error" | "blackhole", "ms": <int> }` — `ms` is the
 added latency, required for `slow` and ignored otherwise. `GET /admin/chaos` returns
@@ -282,6 +331,9 @@ docs finds the log lines and the metrics too.
 | `circuit_opened` / `circuit_half_open` / `circuit_closed` | WARNING / INFO / INFO | Breaker transitions. |
 | `rate_limit_rejected` | INFO | 429 returned. |
 | `rate_limit_degraded` | WARNING | Redis unreachable; serving on the local fallback bucket. |
+| `stream_committed` | INFO | First byte written to the client; failover is no longer possible for this request. |
+| `stream_truncated` | ERROR | A committed stream died mid-body. Carries `emitted_bytes` and the region. |
+| `stream_preroll_failover` | WARNING | A region failed before commit, so the failover was invisible to the client. |
 
 ### Failure classes and codes
 
@@ -331,4 +383,5 @@ for. They are not stylistic preferences.
 |---|---|
 | 2026-07-27 | Initial freeze, before any application code. |
 | 2026-08-07 | Post-review revision: headers scoped to 429 as well as 503; breaker env vars added; failure class/code vocabulary added (§8); `/admin/chaos` body schema added (§3). |
+| 2026-08-07 | Streaming: `stream` request field, `text/event-stream` responses with a `[DONE]` sentinel, the preroll/committed failover rule (§3), three new log events (§8), and a fourth chaos mode `truncate`. ADR-024. |
 | 2026-08-07 | Post-audit hardening: control plane authenticated and disabled-by-default; trusted proxies narrowed to loopback; body bounded before buffering; boot-time config validation; upstream response headers forwarded. ADR-017 through ADR-020. |

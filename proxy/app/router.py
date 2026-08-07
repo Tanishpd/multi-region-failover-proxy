@@ -271,6 +271,80 @@ class ResilientRouter:
             return True
         return resp.status_code == 503 and "retry-after" in resp.headers
 
+    async def open_stream(self, req: ProxyRequest):
+        """Walk the priority list, returning the first lease that PREROLLS.
+
+        Deliberately mirrors `route`: same order, same breaker gate, same
+        failure classification, same `upstream_failover` log line. A region that
+        dies before its first byte is indistinguishable to the client from one
+        that was never tried — which is the entire point of pulling the first
+        chunk before writing anything downstream.
+
+        Returns (lease, attempts) or (None, attempts) if every region failed.
+        """
+        from app import streaming
+
+        t_start = time.perf_counter()
+        deadline = t_start + self.s.total_budget_ms / 1000
+        attempts: list[Attempt] = []
+
+        for spec in self.registry.ordered()[: self.s.region_attempt_limit]:
+            if deadline - time.perf_counter() < self.s.min_attempt_ms / 1000:
+                attempts.append(Attempt(spec.id, "budget_exhausted", 0.0, sent=False))
+                break
+
+            if self.breaker is not None:
+                allowed, state = self.breaker.allow(spec.id)  # type: ignore[attr-defined]
+                if not allowed:
+                    attempts.append(Attempt(spec.id, f"{state}_skipped", 0.0, sent=False))
+                    logx("region_skipped_breaker_open", region=spec.id, state=state)
+                    continue
+
+            t0 = time.perf_counter()
+            exc: BaseException | None = None
+            try:
+                lease = await streaming.open_stream(
+                    self.clients[spec.id].client,
+                    spec.id,
+                    method=req.method,
+                    path=req.path,
+                    content=req.body,
+                    headers=req.upstream_headers(spec.id),
+                    ttfb_timeout_s=self.s.stream_ttfb_timeout_s,
+                )
+            except UpstreamStatusError as e:
+                exc = e
+                fclass, code = FailureClass.RESPONSE_ERROR, f"http_{e.status}"
+            except (httpx.HTTPError, TimeoutError) as e:
+                exc = e
+                fclass, code = classify(e)
+            else:
+                self._record_success(spec.id)
+                attempts.append(Attempt(spec.id, "ok", _ms_since(t0)))
+                return lease, attempts
+
+            self._record_failure(spec.id, code)
+            elapsed = _ms_since(t0)
+            metrics.ATTEMPT_FAILED.labels(spec.id, code).inc()
+            attempts.append(Attempt(spec.id, code, elapsed, fclass=fclass))
+
+            nxt = self.registry.next_after(spec.id)
+            if nxt is not None:
+                logx(
+                    "stream_preroll_failover",
+                    level=logging.WARNING,
+                    from_region=spec.id,
+                    to_region=nxt.id,
+                    error_class=type(exc).__qualname__,
+                    code=code,
+                    elapsed_ms=round(elapsed, 2),
+                    request_id=req.request_id,
+                )
+                metrics.FAILOVER.labels(spec.id, nxt.id, code).inc()
+
+        logx("all_regions_down", level=logging.ERROR, streaming=True, attempts=len(attempts))
+        return None, attempts
+
     def _record_success(self, region_id: str) -> None:
         self.health[region_id] = RegionHealth(ok=True, code="ok", at=time.time())
         metrics.observe_health(region_id, True)

@@ -153,6 +153,19 @@ class Settings(BaseSettings):
     api_keys_file: str = ""
 
     graceful_shutdown_s: int = 5
+
+    # Streaming is OFF in the demo profile so the graded behaviour is unchanged
+    # by its presence, not merely equivalent.
+    streaming_enabled: bool = False
+    # Time to first byte. This is the replayable window: a region that fails
+    # inside it is swapped invisibly.
+    stream_ttfb_timeout_s: float = 30.0
+    # Silence between chunks once committed. Generous, because a model pausing
+    # mid-generation is normal and truncating it would be worse than waiting.
+    stream_inter_chunk_timeout_s: float = 60.0
+    # Streams hold a pool connection for their whole life, so they get their own
+    # admission budget rather than sharing the buffered one.
+    max_inflight_streams: int = 32
     chaos_mode: int = 0
     chaos_token: str = ""
 

@@ -58,6 +58,9 @@ services:
       MRFP_TOTAL_BUDGET_MS: "900"
       MRFP_MAX_INFLIGHT: "128"
       MRFP_BODY_READ_TIMEOUT_S: "5"
+      # Off by default: the demo profile's behaviour must be unchanged by
+      # streaming's presence, not merely equivalent to it.
+      MRFP_STREAMING_ENABLED: "${MRFP_STREAMING_ENABLED:-0}"
       # LOOPBACK ONLY. This previously included 172.16.0.0/12 so that XFF would
       # be honoured for host traffic — but the Docker bridge gateway that every
       # external request arrives from lives in that range, which made every

@@ -90,6 +90,22 @@ class RegionClient:
             ),
         )
 
+    def stream(self, method: str, path: str, *, content: bytes, headers: dict[str, str]):
+        """The httpx streaming context manager, unentered.
+
+        Deliberately no timeout= here: a streamed response needs a
+        time-to-first-byte bound and an inter-chunk bound, which are different
+        numbers, and both are applied by app.streaming rather than by a single
+        httpx read timeout that would kill a legitimately long generation.
+        """
+        return self._client.stream(
+            method,
+            path,
+            content=content,
+            headers=headers,
+            timeout=httpx.Timeout(None, connect=self._connect_ms / 1000),
+        )
+
     async def purge_pool(self, drain_after_s: float = 0.25) -> None:
         """Swap in a fresh client, then close the old one once attempts drain.
 

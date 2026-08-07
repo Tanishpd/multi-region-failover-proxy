@@ -8,11 +8,59 @@ import logging
 import secrets
 
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from app import metrics
 from app.logging_setup import logx
 from app.schemas import ProxyRequest, ProxyResult, problem
+
+
+def _wants_stream(body: bytes, enabled: bool) -> bool:
+    """Peek at the parsed body for `stream: true`.
+
+    Cheap and forgiving: a malformed body is not this function's problem, the
+    upstream will reject it with a 4xx that passes straight through.
+    """
+    if not enabled:
+        return False
+    import json as _json
+
+    try:
+        return bool(_json.loads(body).get("stream"))
+    except Exception:
+        return False
+
+
+async def _infer_streaming(request: Request, req: ProxyRequest) -> Response:
+    """Streaming path. Failover is possible until the first byte, then never.
+
+    The lease already holds the upstream's first chunk, so everything up to
+    here was replayable and any region failure was invisible to the client.
+    """
+    from app import streaming
+
+    state = request.app.state
+    lease, attempts = await state.router.open_stream(req)
+
+    if lease is None:
+        result = ProxyResult.all_failed(attempts, 0.0)
+        return result.to_response(primary_region=state.primary_region)
+
+    base = {
+        "X-Served-By-Region": lease.region,
+        "X-Failover-Path": ",".join(a.render() for a in attempts) or "-",
+        "X-Attempts": str(len(attempts)),
+        "X-Degraded": "0" if lease.region == state.primary_region else "1",
+    }
+    return StreamingResponse(
+        streaming.pump(
+            lease,
+            request_id=req.request_id,
+            inter_chunk_timeout_s=state.settings.stream_inter_chunk_timeout_s,
+        ),
+        media_type=lease.headers.get("content-type", "text/event-stream"),
+        headers=streaming.response_headers(lease, base),
+    )
 
 
 async def infer(request: Request) -> Response:
@@ -50,6 +98,16 @@ async def infer(request: Request) -> Response:
             title = "Request timeout" if status == 408 else "Request body too large"
             logx("request_rejected", level=logging.WARNING, status=status, detail=detail)
             return problem(status, "body-rejected", title, detail)
+
+        if _wants_stream(req.body, state.settings.streaming_enabled):
+            try:
+                return await _infer_streaming(request, req)
+            finally:
+                # The slot is released as soon as the response STARTS. A stream
+                # can run for minutes; holding a buffered-path admission slot
+                # for its whole life would let a handful of long generations
+                # shut out every short request.
+                metrics.ADMISSION_INFLIGHT.dec()
 
         try:
             result: ProxyResult = await state.router.route(req)

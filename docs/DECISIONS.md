@@ -567,3 +567,53 @@ a region outage physically cannot produce, which also makes them a nearly false-
 
 **Consequence.** Overload now produces a fast 503 at admission with `proxy_admission_rejected_total`
 rising, and `proxy_region_pool_waiters` goes positive before any of it — the leading indicator.
+
+---
+
+<a id="adr-024"></a>
+
+## ADR-024: Streaming, and the commit latch
+
+**Date:** 2026-08-07 · **Status:** accepted
+
+**Context.** Streaming is the dominant real use case for a model API, and it appears to contradict
+[ADR-006](#adr-006): request bodies are buffered *precisely so* a failed attempt can be replayed to
+another region, and a streamed response cannot be replayed once the client has seen part of it.
+
+The resolution is to notice that **replayability is not a property of the request. It is a property
+of how far the response has already travelled.**
+
+**Decision.** The proxy pulls the upstream's headers **and its first chunk** before writing a single
+byte downstream. That makes the entire time-to-first-byte window replayable:
+
+| Phase | Meaning | Failover |
+|---|---|---|
+| `preroll` | headers + first chunk received, nothing sent downstream | **possible, and invisible** |
+| `committed` | at least one byte written to the client | **structurally impossible** |
+
+Pulling the first chunk rather than only the headers is what makes this worth having: an upstream
+that returns `200 text/event-stream` instantly and then dies before producing a token is the most
+likely mid-deploy failure shape, and it lands entirely inside the replayable window.
+
+After commit, a failure emits an in-band `event: error` frame and then **raises**. Raising is the
+point: returning would let uvicorn write the terminal zero-length chunk and tell the client it
+received a complete answer. Truncation is therefore signalled twice — no `[DONE]` sentinel for an
+SSE client, and an incomplete body for an HTTP/1.1-correct one — because either signal alone is
+missable by a reasonable client.
+
+Two timers, not one. Time-to-first-byte bounds the replayable window; a separate inter-chunk timer
+bounds silence afterwards. The inter-chunk timer wraps **only the upstream read**, never the
+downstream yield — wrapping the yield would make a slow *client* look like a dead region and
+truncate a perfectly healthy generation.
+
+**Consequence.** Streaming is off in the demo profile, so the graded behaviour is unchanged by its
+presence rather than merely equivalent to it. Verified live: a region stopped before the first byte
+produced `us-east-1:connect_error(31.9ms),eu-west-1:ok(97.1ms)` and a normal `[DONE]` stream, while
+the same region dying mid-body produced three tokens, an `event: error` frame, zero `[DONE]`, and
+**no failover**. Chaos scenario `truncate-mid-stream` asserts both (A17, A18); ids start at 17
+because A14–A16 belong to the blackout set.
+
+Mid-stream resume — reconnecting to a second region and continuing from a token offset — was
+considered and rejected. It only works because this mock's inference is `blake2b`-deterministic. A
+real model behind a different GPU, batch composition or sampler is not, so building it here would
+encode an assumption that dissolves the moment the mock is replaced. Commit is commit.
