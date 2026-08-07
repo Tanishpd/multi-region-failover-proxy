@@ -14,6 +14,7 @@ from app import metrics
 from app.logging_setup import logx
 from app.ratelimit.local_fallback import LocalBucket
 from app.ratelimit.scripts import LuaScript
+from app.redis_client import classify_redis_error
 
 LUA_PATH = Path(__file__).parent / "lua" / "token_bucket.lua"
 
@@ -107,6 +108,7 @@ class TokenBucketLimiter:
                     self.breaker.record_success("redis")
                 decision = self._decode(reply, key)
                 metrics.RATE_LIMIT_DECISIONS.labels("redis").inc()
+                metrics.RATE_LIMIT_BACKEND_UP.set(1)
                 # A Counter is incremented, never assigned; mirror the script's
                 # running total by advancing it by whatever it has not seen yet.
                 if self.script.noscript_recoveries > self._recoveries_seen:
@@ -116,11 +118,19 @@ class TokenBucketLimiter:
                     self._recoveries_seen = self.script.noscript_recoveries
                 return decision
             except (RedisError, TimeoutError, OSError) as exc:
+                # `auth` and `unreachable` are the same exception hierarchy but
+                # opposite operational events: one is a config bug that will
+                # never heal, the other is an outage the fallback exists for.
+                # Logging them identically is how production ran unlimited.
+                reason = classify_redis_error(exc)
                 if self.breaker is not None:
                     self.breaker.record_failure("redis", code=type(exc).__name__)
+                metrics.RATE_LIMIT_DEGRADED.labels(reason).inc()
+                metrics.RATE_LIMIT_BACKEND_UP.set(0)
                 logx(
                     "rate_limit_degraded",
-                    level=logging.WARNING,
+                    level=logging.ERROR if reason == "auth" else logging.WARNING,
+                    reason=reason,
                     error_class=type(exc).__qualname__,
                     error=str(exc),
                     fail_mode=self.fail_mode,

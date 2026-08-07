@@ -11,8 +11,17 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-PY=.venv/bin/python
-[ -x "$PY" ] || { echo "FAIL: no venv. Run: make venv" >&2; exit 2; }
+# Locally this is the project venv; in CI the deps are installed against the
+# runner's interpreter and there is no venv to find. Requiring one made this
+# gate exit 2 on every CI run — a gate that cannot run is not a gate.
+if [ -x .venv/bin/python ]; then
+  PY=.venv/bin/python
+elif python3 -c 'import httpx' >/dev/null 2>&1; then
+  PY=python3
+else
+  echo "FAIL: need httpx. Run: make venv" >&2
+  exit 2
+fi
 
 for port in 9001 9002 9003; do
   if ! curl -fsS -m 2 "http://127.0.0.1:${port}/healthz" >/dev/null 2>&1; then

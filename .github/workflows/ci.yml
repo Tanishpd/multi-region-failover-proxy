@@ -68,6 +68,15 @@ jobs:
         env:
           MRFP_ADMIN_TOKEN: ci-admin-token
       - run: docker compose up -d --no-deps redis-guard-seed
+
+      # Gate the PROD profile's timeouts against what the regions actually cost.
+      # Safe on a noisy shared runner despite the arm64 caveat above: this
+      # compares configured against measured and only fails when a timeout is
+      # too SMALL, so runner slowness can only widen the margin. Fewer samples
+      # than a local run — the shape is what matters here, not the precision.
+      - name: gate the prod timeouts against measurement
+        run: bash ops/scripts/calibrate.sh check --samples 8
+
       - run: bash ops/scripts/chaos.sh stop-us-east --rps 20 --duration 14
         env:
           MRFP_CI: "1"

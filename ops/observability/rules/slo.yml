@@ -93,3 +93,28 @@ groups:
         annotations:
           runbook: docs/RUNBOOK.md#alert-mrfppoolqueueing
           summary: Requests are queuing for connections; scale out before it becomes an outage.
+
+      # THE ALERT THAT WAS MISSING. The prod profile shipped with a Redis
+      # password on the server and none on the client: every command returned
+      # NOAUTH, the limiter caught it and failed open exactly as designed, and
+      # the service ran with no rate limiting at all. Nothing paged, because
+      # rate_limit_decisions_total kept counting — just under a different mode
+      # label. This watches the gauge, not the counter.
+      - alert: MRFPRateLimitDegraded
+        expr: rate_limit_backend_up == 0
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          runbook: docs/RUNBOOK.md#alert-mrfpratelimitdegraded
+          summary: The limiter is on its local fallback; the fleet is enforcing far above the limit.
+
+      # Distinct from the above and deliberately faster. `unreachable` is an
+      # outage the fallback exists for; `auth` and `protocol` mean Redis is
+      # answering and refusing us, which never heals on its own.
+      - alert: MRFPRateLimitRefused
+        expr: increase(rate_limit_degraded_total{reason=~"auth|protocol"}[5m]) > 0
+        for: 1m
+        labels: {severity: page}
+        annotations:
+          runbook: docs/RUNBOOK.md#alert-mrfpratelimitrefused
+          summary: Redis is answering and rejecting us — a credential or ACL problem, not an outage.

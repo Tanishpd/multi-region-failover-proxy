@@ -263,3 +263,55 @@ scraper a token, and that the scrape target still resolves.
 Leading indicator, ticket severity. Requests are waiting for a connection but
 nothing has timed out yet. Scale out, or raise the per-region pool, before this
 becomes `MRFPSelfInflictedSaturation`.
+
+### alert-mrfpratelimitdegraded
+
+**Means:** the limiter is not using Redis. Every replica is enforcing its own
+in-process bucket, so the fleet total is roughly `replicas x limit` divided by
+however unevenly traffic is balanced. Requests still succeed — this is a
+correctness problem, not an availability one.
+
+**Check**
+
+```
+curl -s localhost:8000/readyz | jq .rate_limit
+docker compose logs --no-log-prefix mrfp-proxy | jq -c 'select(.event=="rate_limit_degraded")' | tail -5
+```
+
+The `reason` field is the whole diagnosis:
+
+| reason | meaning | action |
+|---|---|---|
+| `unreachable` | Redis is down or unroutable | this is what fail-open is for; restore Redis |
+| `auth` | Redis is up and rejecting us | see [alert-mrfpratelimitrefused](#alert-mrfpratelimitrefused) |
+| `protocol` | Redis rejected the command itself | our script or its arguments; check for a partial deploy |
+| `other` | unclassified | read `error_class`; it belongs in one of the above |
+
+**Fix:** restore Redis. The limiter reattaches on its own — no restart needed,
+and `rate_limit_backend_up` returns to 1 on the first successful decision.
+
+### alert-mrfpratelimitrefused
+
+**Means:** Redis is answering and refusing us. **This will not recover on its
+own**, and unlike an outage it is not what fail-open was designed for: the
+service is serving unlimited traffic while every dashboard reports it healthy.
+
+**Cause, in order of likelihood**
+
+1. `MRFP_REDIS_PASSWORD` not reaching the proxy while Redis runs
+   `--requirepass`. This shipped once — the prod compose set the password on the
+   Redis container only ([ADR-029](DECISIONS.md#adr-029)).
+2. A rotated credential the proxy has not been redeployed with.
+3. An ACL on the account that does not permit `EVALSHA`.
+
+**Check**
+
+```
+docker compose logs --no-log-prefix mrfp-proxy | jq -c 'select(.event=="redis_verified")'
+docker compose exec redis redis-cli -a "$MRFP_REDIS_PASSWORD" ping
+```
+
+**Note:** a *fresh* deploy cannot reach this state — the proxy verifies Redis at
+boot and refuses to start when it is refused. Seeing this alert means the
+credential broke *after* a successful start, so the fix is a redeploy with the
+current secret rather than a config edit.

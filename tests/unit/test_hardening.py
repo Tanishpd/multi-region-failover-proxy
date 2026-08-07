@@ -362,3 +362,43 @@ def test_saturation_metrics_are_actually_written() -> None:
         if metric.endswith("_total"):
             continue
         assert metric in src, f"{metric} is alerted on but never defined"
+
+
+# --- the limiter must announce WHY it degraded (ADR-029) ---------------------
+
+
+def test_the_degraded_path_records_a_reason() -> None:
+    """`auth` and `unreachable` come from one exception hierarchy but are
+    opposite operational events: a config bug that never heals versus the
+    outage fail-open exists for. Logging them identically is how a production
+    profile ran with no rate limiting at all."""
+    body = code_only(ROOT / "proxy" / "app" / "ratelimit" / "limiter.py")
+    assert "classify_redis_error(exc)" in body
+    assert "reason=reason" in body
+    assert "RATE_LIMIT_DEGRADED.labels(reason)" in body
+
+
+def test_an_auth_failure_logs_at_ERROR_not_WARNING() -> None:
+    """It never recovers on its own, so it must not sit at the same level as a
+    transient blip that does."""
+    body = code_only(ROOT / "proxy" / "app" / "ratelimit" / "limiter.py")
+    assert 'logging.ERROR if reason == "auth" else logging.WARNING' in body
+
+
+def test_boot_verifies_that_redis_answers() -> None:
+    """`require_redis` asks whether Redis is CONFIGURED. Nothing asked whether
+    it replied, which is the entire gap this closes."""
+    body = code_only(ROOT / "proxy" / "app" / "main.py")
+    assert "await verify_redis(redis)" in body
+
+
+def test_readyz_reports_the_limiter_without_gating_on_it() -> None:
+    """Reported so an operator can see it; not part of the verdict, because a
+    degraded limiter still serves every request correctly and failing readiness
+    would turn a degradation into a self-inflicted outage."""
+    body = code_only(ROOT / "proxy" / "app" / "api.py")
+    assert '"rate_limit"' in body
+    start = body.index("async def readyz(")
+    section = body[start : start + 1600]
+    assert "status_code=200 if usable else 503" in section, "readiness must still hinge on regions"
+    assert "rate_limit_backend_up() else" in section

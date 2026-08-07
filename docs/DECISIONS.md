@@ -776,3 +776,55 @@ perfectly and would have answered in ~310 ms.
 This is not a bug in the demo profile; 200 ms is frozen by the brief. It is a real property of that
 number, it was invisible while every request cost the same, and it is exactly the class of defect
 this tool exists to surface. `make calibrate` now prints the per-region token ceiling on every run.
+
+---
+
+<a id="adr-029"></a>
+
+## ADR-029: Prove Redis answers; separate "refused" from "unreachable"
+
+**Date:** 2026-08-07 · **Status:** accepted
+
+**Context.** [ADR-013](#adr-013) makes the limiter fail open: losing the shared bucket degrades a
+guarantee, while refusing all traffic because a cache is down is an outage. That is right for an
+outage. It is wrong for a credential.
+
+The production profile shipped Redis with `--requirepass` and gave the proxy no password. Every
+command returned `NOAUTH`. `AuthenticationError` is a `RedisError`, so the limiter caught it, fell
+back to the local bucket, and the service ran with **no effective rate limiting at all** — announced
+by nothing louder than a `rate_limit_degraded` line. `rate_limit_decisions_total` kept counting, just
+under a different `mode` label, so no dashboard looked wrong.
+
+`require_redis` could not catch this. It asks whether Redis is **configured**, never whether it
+**answers**.
+
+There is also a trap in the exception hierarchy: `AuthenticationError` **subclasses**
+`ConnectionError`. The natural check — catch `ConnectionError`, treat it as an outage — files a wrong
+password under "Redis is down" and fails open on it indefinitely.
+
+**Decision.** Classify every Redis failure as `auth` / `unreachable` / `protocol` / `other`, testing
+auth **first** because of that subclassing, and treat the two families as the opposite events they
+are:
+
+- **At boot**, issue a real command. `unreachable` returns and the process starts — Redis may simply
+  be slower to start than we are, and degradation is the designed behaviour. Anything else raises
+  `RedisMisconfigured` and the proxy **refuses to start**, because a credential does not heal itself
+  and booting means serving unlimited traffic while reporting healthy.
+- **At runtime**, `rate_limit_degraded` carries a `reason`, auth logs at ERROR rather than WARNING,
+  `rate_limit_degraded_total` is labelled by reason, and `rate_limit_backend_up` is a gauge that is 0
+  whenever the limiter is on its fallback.
+
+**Readiness deliberately does NOT gate on it.** A degraded limiter still serves every request
+correctly, just unlimited; failing readiness would convert a degradation into a self-inflicted
+outage. `/readyz` reports the state, boot catches the deploy-time case, and `MRFPRateLimitDegraded`
+pages for the runtime case. A credential that breaks *after* a successful boot was rotated, so the
+fix is a redeploy rather than a config edit — which is what the runbook says.
+
+**Consequence.** Verified against a real password-protected Redis: no password refuses to boot,
+wrong password refuses to boot, correct password verifies `ok`, and an unreachable Redis still boots
+and degrades. Two alerts added, both with runbook sections.
+
+The general lesson is the one worth keeping: **fail-open must be scoped to the failures it was
+argued for.** [ADR-013](#adr-013) reasoned about an outage and then silently covered
+misconfiguration too, because both arrive as the same base class. Every fail-open path deserves the
+question "which failures did I actually mean?"

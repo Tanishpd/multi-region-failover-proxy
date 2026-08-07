@@ -223,6 +223,15 @@ async def readyz(request: Request) -> JSONResponse:
             "status": "ready" if usable else "no-regions",
             "usable": usable,
             "regions": {rid: {"ok": h.ok, "last": h.code} for rid, h in router.health.items()},
+            # Reported, deliberately NOT part of the verdict. A degraded limiter
+            # still serves every request correctly, just unlimited, so failing
+            # readiness would turn a degradation into a self-inflicted outage.
+            # The deploy-time case is caught at boot instead, and the runtime
+            # case pages via rate_limit_backend_up. (ADR-029)
+            "rate_limit": {
+                "boot": getattr(state, "redis_boot_state", "unknown"),
+                "backend": "redis" if metrics.rate_limit_backend_up() else "fallback",
+            },
         },
         status_code=200 if usable else 503,
     )

@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager, suppress
 from starlette.applications import Starlette
 from starlette.routing import Route
 
-from app import api
+from app import api, metrics
 from app.auth import KeyStore
 from app.breaker import Breaker
 from app.cluster import BreakerGossip, replica_count
@@ -26,7 +26,7 @@ from app.idempotency import IdempotencyStore
 from app.logging_setup import configure, configure_policy, logx
 from app.middleware.context import ContextMiddleware
 from app.ratelimit.limiter import TokenBucketLimiter
-from app.redis_client import build_redis
+from app.redis_client import build_redis, verify_redis
 from app.region_client import RegionClient
 from app.regions import RegionRegistry
 from app.router import ResilientRouter
@@ -127,6 +127,26 @@ async def lifespan(app: Starlette):
         if (settings.redis_url or settings.redis_sentinels)
         else None
     )
+
+    # Prove it ANSWERS, not merely that it is configured. `require_redis` only
+    # ever checked the latter, which is how a prod profile shipped with
+    # --requirepass on the server and no password on the client: NOAUTH on every
+    # command, caught by the limiter, failed open exactly as designed, and no
+    # rate limiting at all. A refusal is fatal here; an outage is not.
+    redis_state = "absent"
+    if redis is not None:
+        redis_state = await verify_redis(redis)
+        logx(
+            "redis_verified",
+            state=redis_state,
+            level=logging.WARNING if redis_state != "ok" else logging.INFO,
+            topology="sentinel" if settings.redis_sentinels else "url",
+        )
+    app.state.redis_boot_state = redis_state
+    # Seed the gauge, or a proxy that has served nothing yet reports "fallback"
+    # purely because no decision has been made.
+    metrics.RATE_LIMIT_BACKEND_UP.set(1 if redis_state == "ok" else 0)
+
     limiter = TokenBucketLimiter(
         redis,
         capacity=settings.rl_capacity,

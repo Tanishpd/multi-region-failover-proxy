@@ -131,11 +131,33 @@ RATE_LIMIT_DECISIONS = Counter(
     registry=REGISTRY,
 )
 
+RATE_LIMIT_DEGRADED = Counter(
+    "rate_limit_degraded_total",
+    "Falls back off Redis, by reason: auth, unreachable, protocol, other.",
+    ["reason"],
+    registry=REGISTRY,
+)
+
+RATE_LIMIT_BACKEND_UP = Gauge(
+    "rate_limit_backend_up",
+    "1 when the last limiter decision came from Redis, 0 when it fell back. "
+    "The signal that was missing when production ran unlimited: decisions_total "
+    "kept counting, just under a different mode label.",
+    registry=REGISTRY,
+)
+
 NOSCRIPT_RECOVERIES = Counter(
     "rate_limit_noscript_recoveries_total",
     "EVALSHA NOSCRIPT recoveries. Nonzero only after a Redis restart or SCRIPT FLUSH.",
     registry=REGISTRY,
 )
+
+
+def rate_limit_backend_up() -> bool:
+    """Read the gauge back. `/readyz` reports it; nothing branches on it."""
+    # prometheus-client exposes no public reader for a Gauge's current value.
+    return bool(RATE_LIMIT_BACKEND_UP._value.get())
+
 
 _STATE_VALUE = {"closed": 0, "half_open": 1, "open": 2}
 

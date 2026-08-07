@@ -117,7 +117,9 @@ class RegionProfile:
             return 0.0
         mx, my = statistics.mean(xs), statistics.mean(ys)
         denom = sum((x - mx) ** 2 for x in xs)
-        return sum((x - mx) * (y - my) for x, y in zip(xs, ys, strict=True)) / denom if denom else 0.0
+        return (
+            sum((x - mx) * (y - my) for x, y in zip(xs, ys, strict=True)) / denom if denom else 0.0
+        )
 
     @property
     def ttft_ms(self) -> float:
