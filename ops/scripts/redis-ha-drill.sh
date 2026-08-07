@@ -55,11 +55,19 @@ MASTER_IP=$(echo "$ADDR" | awk '{print $1}')
 MASTER_PORT=$(echo "$ADDR" | awk '{print $2}')
 echo "primary address: ${MASTER_IP}:${MASTER_PORT}"
 
+# Sentinel reports an ADDRESS, and which kind depends on history: a freshly
+# monitored primary comes back as the configured hostname (`redis-primary`,
+# because `sentinel resolve-hostnames yes`), while a node promoted by a failover
+# comes back as an IP. Matching only on IP worked on a topology that had already
+# failed over and silently found nothing on a fresh one — so match both.
 TARGET=""
 for candidate in mrfp-redis-primary mrfp-redis-replica; do
   ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' \
     "$candidate" 2>/dev/null || true)
-  [ "$ip" = "$MASTER_IP" ] && TARGET="$candidate"
+  service="${candidate#mrfp-}"
+  if [ "$ip" = "$MASTER_IP" ] || [ "$service" = "$MASTER_IP" ]; then
+    TARGET="$candidate"
+  fi
 done
 
 if [ -z "$TARGET" ]; then

@@ -159,3 +159,38 @@ def test_the_password_reaches_the_plain_url_client_too() -> None:
 def test_an_unset_password_does_not_clobber_one_embedded_in_the_url() -> None:
     client = build_redis("redis://:fromurl@127.0.0.1:6380/0", password="")
     assert client.connection_pool.connection_kwargs.get("password") == "fromurl"
+
+
+def test_the_demo_stack_can_be_pointed_at_sentinel() -> None:
+    """FIFTH instance of the same reachability bug.
+
+    Sentinel support was built, drilled against five containers, and plumbed
+    into the PROD compose — while docker-compose.yml still hardcoded
+    `MRFP_REDIS_URL: redis://redis:6379/0` with no sentinel variables. So the
+    HA topology that ships alongside the demo stack could not be reached from
+    it, and `make redis-ha-e2e` was impossible to run without editing a file
+    the tests treat as frozen.
+    """
+    raw = (ROOT / "docker-compose.yml").read_text()
+    assert "MRFP_REDIS_SENTINELS" in raw
+    assert "MRFP_REDIS_MASTER_NAME" in raw
+    # And the URL must stay overridable, or sentinels can never win over it.
+    assert 'MRFP_REDIS_URL: "${MRFP_REDIS_URL:-redis://redis:6379/0}"' in raw
+
+
+def test_the_ha_drills_match_sentinel_on_hostname_as_well_as_ip() -> None:
+    """Sentinel reports an ADDRESS whose kind depends on history: a freshly
+    monitored primary comes back as the configured hostname, a promoted one as
+    an IP. Matching only on IP worked on a topology that had already failed over
+    and silently found nothing on a fresh one."""
+    for script in ("redis-ha-drill.sh", "redis-ha-e2e.sh"):
+        body = (ROOT / "ops" / "scripts" / script).read_text()
+        assert 'service="${candidate#mrfp-}"' in body, f"{script} matches only on IP"
+
+
+def test_the_e2e_drill_asserts_the_degradation_actually_happened() -> None:
+    """A run with zero degraded decisions means the outage never reached the
+    limiter — the drill would pass while proving nothing."""
+    body = (ROOT / "ops" / "scripts" / "redis-ha-e2e.sh").read_text()
+    assert "no rate_limit_degraded lines" in body
+    assert "did not reattach" in body

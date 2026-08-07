@@ -49,7 +49,15 @@ services:
     environment:
       MRFP_PROFILE: "${MRFP_PROFILE:-demo}"
       MRFP_MODE: "${MRFP_MODE:-literal}"
-      MRFP_REDIS_URL: redis://redis:6379/0
+      # Overridable so the demo stack can be pointed at the Sentinel topology
+      # in deploy/compose.redis-ha.yml without editing this file. The default is
+      # unchanged, so an unset variable behaves exactly as before.
+      MRFP_REDIS_URL: "${MRFP_REDIS_URL:-redis://redis:6379/0}"
+      # Set these to reach Redis via Sentinel instead; they WIN over the URL.
+      # (ADR-027) `make redis-ha-up && make redis-ha-e2e` exercises it.
+      MRFP_REDIS_SENTINELS: "${MRFP_REDIS_SENTINELS:-}"
+      MRFP_REDIS_MASTER_NAME: "${MRFP_REDIS_MASTER_NAME:-mrfp-master}"
+      MRFP_REDIS_PASSWORD: "${MRFP_REDIS_PASSWORD:-}"
       MRFP_REGIONS_FILE: /config/regions.yaml
       MRFP_LOG_LEVEL: "${MRFP_LOG_LEVEL:-INFO}"
       MRFP_READ_TIMEOUT_MS: "200"

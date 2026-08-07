@@ -730,6 +730,20 @@ runs. The extra ~2.5 s is the client's own reconnect cycle — `MasterNotFoundEr
 still deciding, then a fresh connect. During that window the limiter degrades to the local bucket,
 which is the designed behaviour and needed no change.
 
+**Then it was run in anger** (`make redis-ha-e2e`): the proxy pointed at the sentinels, 10 rps of real
+`/v1/infer` traffic, and the current primary killed mid-flight. The earlier drill proved the redis
+*client* survives a promotion; this proves a *caller* never sees one.
+
+```
+250 requests   200: 250   client_errors: 0   server_errors: 0
+ratelimit_modes: {redis: 219, local: 31}
+p50 33.5 ms / max 93.8 ms      31 rate_limit_degraded    backend_up back to 1
+```
+
+The 31 `local` decisions are the point: the degradation genuinely happened, was served from the
+in-process bucket, and healed. A run showing zero would mean the outage never reached the limiter and
+the drill proved nothing, so the script asserts on it.
+
 Two data nodes still means a restarted old primary briefly believes it is a primary before Sentinel
 demotes it. `min-replicas-to-write` would close that, but on a two-node topology it also makes losing
 one node stop writes entirely — strictly worse. Three data nodes is the production shape; this is
@@ -780,6 +794,16 @@ Every region healthy; every region timed out; 503. No measurement of the mock co
 because the mock was configured to be fast. For the record the prod profile's 30000 ms comfortably
 covers the measured 7929 ms requirement — the guess was conservative, not wrong. What changed is that
 something now justifies it.
+
+**Failover was then drilled at real-model latency**, which the chaos matrix had never done — every
+prior run used the mock's 15-150 ms. With regions on Ollama and a proxy configured from the
+measurement (`read 8000 ms`, `connect 1000 ms`, `budget 30000 ms`), `docker stop us-east-1-endpoint`
+mid-flight gave **52 requests, all 200, zero errors, 32 logged `upstream_failover` events**, p50
+206.7 ms / max 1244.4 ms. The failover path works at real latencies, not only at the mock's.
+
+Worth recording: the first attempt at that proxy refused to boot —
+`MRFP_TOTAL_BUDGET_MS=20000 is below 3 x (connect 1000 + read 8000) = 27000ms`. The budget validator
+caught a misconfiguration I had just written by hand, which is exactly the case it exists for.
 
 **And the tool caught itself.** The first real run reported
 `MRFP_STREAM_INTER_CHUNK_TIMEOUT_S = 1.0` derived from **zero** stream samples: the passthrough did

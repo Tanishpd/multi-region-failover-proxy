@@ -33,7 +33,8 @@ RUFF    := $(VENV)/bin/ruff
 
 .PHONY: help doctor venv build up up-regions down ps health logs \
         test-unit test lint fmt docs-check chaos report bench reset clean \
-        prod-config prod-up prod-down capacity
+        prod-config prod-up prod-down capacity calibrate calibrate-check \
+        redis-ha-up redis-ha-down redis-ha-drill redis-ha-e2e
 
 # --- meta -------------------------------------------------------------------
 
@@ -131,6 +132,11 @@ redis-ha-down:
 # Kills whichever node Sentinel currently calls primary and measures the blip.
 redis-ha-drill:
 	@bash ops/scripts/redis-ha-drill.sh
+
+# The same kill, but under LIVE proxy traffic — the version that proves a
+# promotion is invisible to a caller rather than merely survivable by a client.
+redis-ha-e2e:
+	@bash ops/scripts/redis-ha-e2e.sh
 
 # --- housekeeping -----------------------------------------------------------
 
